@@ -9,4 +9,4 @@ toolchain or ship prebuilt binaries.
 - For the bundled assembler (`bradasm`) and the source-kit emulator (`brad_core_emu`) interfaces, see [Toolchain and Reference Implementations](11-toolchain.md).
 - For simulating the CPU RTL, see [FPGA](12-fpga.md).
 
-The BradVector **GPU/accelerator** toolchain (`bradc`, BVRT, `bradgdb`, BradTimeline, `braddev`) is a separate ISA and is documented in the [BradVector repository](https://github.com/BradDevicesOfficial/BradVector).
+The BradVector **GPU/accelerator** toolchain (`bradc`, BVRT, `bradgdb`, BradTimeline, `braddev`) is a separate ISA and is documented in the [BradVector repository](https://github.com/Brad-Devices/BradVector).

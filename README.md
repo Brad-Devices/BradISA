@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/BradDevicesOfficial/brad-devices/main/assets/brad-devices-wordmark/svg/brad-devices-wordmark-white.svg">
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/BradDevicesOfficial/brad-devices/main/assets/brad-devices-wordmark/svg/brad-devices-wordmark-black.svg">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Brad-Devices/brad-devices/main/assets/brad-devices-wordmark/svg/brad-devices-wordmark-white.svg">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Brad-Devices/brad-devices/main/assets/brad-devices-wordmark/svg/brad-devices-wordmark-black.svg">
     <img alt="BRAD DEVICES" width="360">
   </picture>
 </p>
@@ -9,13 +9,13 @@
 <p align="center">
   <em>of</em>&nbsp;&nbsp;
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/BradDevicesOfficial/brad-devices/main/assets/brad-verse-wordmark/svg/brad-verse-wordmark-flat-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/BradDevicesOfficial/brad-devices/main/assets/brad-verse-wordmark/svg/brad-verse-wordmark-flat-light.svg">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Brad-Devices/brad-devices/main/assets/brad-verse-wordmark/svg/brad-verse-wordmark-flat-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Brad-Devices/brad-devices/main/assets/brad-verse-wordmark/svg/brad-verse-wordmark-flat-light.svg">
     <img alt="BRADVERSE" width="190">
   </picture>
 </p>
 
-[![CI](https://github.com/BradDevicesOfficial/BradISA/actions/workflows/ci.yml/badge.svg)](https://github.com/BradDevicesOfficial/BradISA/actions/workflows/ci.yml)
+[![CI](https://github.com/Brad-Devices/BradISA/actions/workflows/ci.yml/badge.svg)](https://github.com/Brad-Devices/BradISA/actions/workflows/ci.yml)
 
 <p align="center">
   <img alt="C" src="https://img.shields.io/badge/C-8A6D1F?style=for-the-badge">&nbsp;
@@ -106,7 +106,7 @@ See `rtl/README.md` for build and simulation instructions.
 - **Live specs:** [BradISA V1](https://brad-devices.vercel.app/assets/specs/bradisa_spec.pdf) · [BradISA V2](https://brad-devices.vercel.app/assets/specs/bradisa_v2_ext.pdf)
 - **Site:** [brad-devices.vercel.app](https://brad-devices.vercel.app)
 - **Contact:** brad.devices.official@gmail.com
-- **GitHub:** [BradDevicesOfficial](https://github.com/BradDevicesOfficial)
+- **GitHub:** [Brad-Devices](https://github.com/Brad-Devices)
 
 ---
 

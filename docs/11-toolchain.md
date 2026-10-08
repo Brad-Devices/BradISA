@@ -156,5 +156,5 @@ mode, and the MSR set documented in [MSR reference](07-msr-reference.md).
   the spec disagree, in which case the RTL wins and the prose gets corrected.
 
 See also: [FPGA](12-fpga.md) for simulating the RTL, and the
-[BradVector repository](https://github.com/BradDevicesOfficial/BradVector)
+[BradVector repository](https://github.com/Brad-Devices/BradVector)
 for the separate GPU/accelerator ISA and its shipped toolchain.
