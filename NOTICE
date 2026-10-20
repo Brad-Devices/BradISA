@@ -1,0 +1,29 @@
+Brad Devices
+Copyright 2026 Brad Devices
+
+This product includes software developed by Brad Devices.
+
+Trademarks
+----------
+"Brad Devices", "BradVerse", "BradSilicon", "BradVector", "BradISA", "BradOS",
+"BradApex", "BradNPU", "BradLabs", "BradStudios", "BradSkynet", "BradAstra",
+"BradDev", "BradBoard", "BradFusion", "BradGfx", "BradFx", "BradCore", "BradXon",
+"BradPay", "BradCure", "BradSense", "SPMP", "NCC", "BVRT", "BradRAM", "MVRAM"
+and "TIFA" are trademarks of Brad Devices.
+
+They are not licensed under the Apache License, Version 2.0. This licence covers
+the covered work only, and grants no right to use these marks.
+
+You may use the names descriptively and factually -- to state that your product
+is compatible with, built on, or tested against BradISA, or that it uses Brad
+Devices software. That use must not imply sponsorship, endorsement, or a
+commercial relationship.
+
+Note on intent
+--------------
+The code and the specification are licensed permissively on purpose: a
+specification nobody may build on is not a standard. The name is what is
+protected here, and it is protected by trademark registration.
+
+See COMPANY/IP_PUBLICATION_POLICY.md in the Brad Devices repository for the
+publication policy, and TRADEMARKS.md for the full reserved list.
