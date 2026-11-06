@@ -263,7 +263,7 @@ Element widths (SEW) & 8, 16, 32, 64 bits \\
 Elements per register & 32$\times$8-bit / 16$\times$16-bit / 8$\times$32-bit / 4$\times$64-bit \\
 FP formats & FP32, FP64 (Gen1); FP16 (Gen2) \\
 Mask register & {\tt v0} (reserved for Gen2 predication) \\
-Primary opcode & {\tt 0xF} (VEXT group; a class-clear word is {\tt RET}, i.e. {\tt PC = rs1}) \\
+Primary opcode & {\tt 0xF} (VEXT group; {\tt 0xF0000000} remains {\tt RET}) \\
 Vector unit enable & MSR~23 (VSTATUS.VE) \\
 Issue rate & 1 vector op/cycle (Phoenix), 256-bit datapath \\
 \bottomrule
@@ -320,11 +320,11 @@ scalars are passed in lane~0 of {\tt v1}--{\tt v4}.
 
 \subsection{Encoding}
 
-Vector instructions are 32-bit words with primary opcode {\tt 0xF}. A clear
-3-bit class field selects the V1 {\tt RET} encoding, which is the
-register-indirect jump {\tt PC = rs1}; \textbf{all other} {\tt 0xF} encodings
-are vector instructions. The class field occupies bits [27:25] and selects the
-functional group.
+Vector instructions are 32-bit words with primary opcode {\tt 0xF}. The
+fixed encoding {\tt 0xF0000000} remains the V1 {\tt RET} instruction for
+backward compatibility; \textbf{all other} {\tt 0xF} encodings are vector
+instructions. A 3-bit class field in bits [27:25] selects the functional
+group.
 
 \begin{table}[H]
 \centering
@@ -345,10 +345,8 @@ Format & Class & Field layout (32-bit word) \\
 {\tt F} = primary opcode {\tt 0xF} (bits [31:28]). {\tt sew}: 00=8-bit,
 01=16-bit, 10=32-bit, 11=64-bit. {\tt vd}, {\tt vs1}, {\tt vs2} select
 vector registers (5-bit); {\tt base}, {\tt rs}, {\tt rd} select scalar GPRs
-(4-bit). No vector instruction may be encoded with the class field clear;
-such a word is always {\tt RET} ({\tt PC = rs1}), so the all-zero word
-{\tt 0xF0000000} returns to address 0 and {\tt 0xF0E00000} returns to
-{\tt lr}.
+(4-bit). No vector instruction may encode {\tt 0xF0000000}; such a word is
+always {\tt RET}.
 
 \begin{figure}[H]
 \centering

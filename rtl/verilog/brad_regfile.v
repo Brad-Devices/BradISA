@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
-// BradISA V1 -- Register File (synchronous write, async read)
+// BradISA V2 -- Register File
+// 32 x 32-bit general-purpose registers.  r0 is hardwired to zero.
+// Synchronous write, asynchronous read.  Forwarding lives in brad_core.
 
 `include "bradisa_defines.v"
 
@@ -7,13 +9,13 @@ module brad_regfile (
     input  wire         clk,
     input  wire         rst_n,
     // Read ports
-    input  wire [3:0]   raddr1,
-    output reg  [31:0]  rdata1,
-    input  wire [3:0]   raddr2,
-    output reg  [31:0]  rdata2,
+    input  wire [4:0]   raddr1,
+    output wire [31:0]  rdata1,
+    input  wire [4:0]   raddr2,
+    output wire [31:0]  rdata2,
     // Write port
     input  wire         we,
-    input  wire [3:0]   waddr,
+    input  wire [4:0]   waddr,
     input  wire [31:0]  wdata
 );
 
@@ -29,10 +31,9 @@ module brad_regfile (
         end
     end
 
-    // Read ports (asynchronous)
-    always @(*) begin
-        rdata1 = (raddr1 == BRAD_R0) ? 32'd0 : regs[raddr1];
-        rdata2 = (raddr2 == BRAD_R0) ? 32'd0 : regs[raddr2];
-    end
+    // Asynchronous read ports.  r0 reads as zero even though it is never
+    // written, so a stray write cannot corrupt it either.
+    assign rdata1 = (raddr1 == BRAD_R0) ? 32'd0 : regs[raddr1];
+    assign rdata2 = (raddr2 == BRAD_R0) ? 32'd0 : regs[raddr2];
 
 endmodule

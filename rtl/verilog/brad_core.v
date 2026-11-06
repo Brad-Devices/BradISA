@@ -1,98 +1,142 @@
 // SPDX-License-Identifier: MIT
-// BradISA V1 -- BradCore (Falcon 5-stage pipeline)
-// Synthesisable RTL for FPGA. Stages: F1→F2→D→EX→WB
-// Simple in-order, single-issue, no forwarding (stall on RAW hazards).
+// BradISA V2 -- BradCore (Falcon pipeline)
+// Synthesisable RTL for FPGA.  Stages: F -> D -> EX -> WB.
+//
+// In-order, single-issue, no stalls.  RAW hazards are covered by forwarding
+// from the EX and WB stages into the decode operand capture, which is sound
+// here because the data memory returns in the same cycle (the single-cycle
+// memory contract this core is specified against).  A multi-cycle memory
+// would need the stall path that brad_decode already exposes.
 
 `include "bradisa_defines.v"
 
 module brad_core (
     input  wire         clk,
     input  wire         rst_n,
-    // Instruction memory port (single-cycle)
+    // Instruction memory port (single-cycle, combinational read)
     output wire [31:0]  imem_addr,
     input  wire [31:0]  imem_rdata,
-    // Data memory port (single-cycle)
+    // Data memory port (single-cycle, combinational read)
     output wire [31:0]  dmem_addr,
     output wire         dmem_req,
     output wire         dmem_we,
+    output wire [3:0]   dmem_be,
     output wire [31:0]  dmem_wdata,
-    input  wire [31:0]  dmem_rdata
+    input  wire [31:0]  dmem_rdata,
+    // One-cycle fault: undefined opcode or divide by zero in EX
+    output wire         fault
 );
 
-    // ─── Pipeline registers ────────────────────────────────────
-    // Stage 1: Fetch
+    // ─── Fetch stage ────────────────────────────────────────────
     reg         f_valid;
-    reg [31:0]  f_pc;
-    reg [31:0]  f_insn;
-    // Stage 2: Decode
-    reg         d_valid;
-    reg [31:0]  d_pc;
-    reg [3:0]   d_opcode;
-    reg [3:0]   d_rd;
-    reg [3:0]   d_rs1;
-    reg [3:0]   d_rs2;
-    reg [31:0]  d_rs1_val;
-    reg [31:0]  d_rs2_val;
-    reg [31:0]  d_imm;
-    reg         d_reg_we;
-    // (no separate E-stage registers: writeback is Decode-driven so the
-    //  result commits to the register file in the same cycle the ALU sees it)
+    reg  [31:0] f_pc;
+    reg  [31:0] f_insn;
 
-    // ─── PC ────────────────────────────────────────────────────
-    reg [31:0] pc;
-    wire [31:0] next_pc;
+    // ─── Decode stage (registered outputs of brad_decode) ──────
+    wire        d_valid;
+    wire [5:0]  d_opcode;
+    wire [4:0]  d_rd;
+    wire [4:0]  d_rs1;
+    wire [4:0]  d_rs2;
+    wire [31:0] d_rs1_val;
+    wire [31:0] d_rs2_val;
+    wire [31:0] d_pc;
+    wire [31:0] d_imm;
+    wire        d_reg_we;
+    wire        d_undef;
+    wire [2:0]  d_fmt;
+
+    // ─── Writeback stage ────────────────────────────────────────
+    reg         w_valid;
+    reg  [4:0]  w_rd;
+    reg  [31:0] w_result;
+    reg         w_reg_we;
+
+    // ─── PC ─────────────────────────────────────────────────────
+    reg  [31:0] pc;
     wire        branch_taken;
+    wire [31:0] branch_target;
 
-    // ─── Register file ─────────────────────────────────────────
-    // Read ports track the instruction about to enter Decode (raw_* fields of
-    // the Fetch-stage instruction), not the stale Decode-stage copy, so the
-    // operand captured at the Decode posedge belongs to that instruction.
-    wire [3:0]  rf_raddr1 = raw_rs1;
-    wire [3:0]  rf_raddr2 = raw_rs2;
+    // ─── Decode / register file wiring ──────────────────────────
+    wire [4:0]  id_raddr1;
+    wire [4:0]  id_raddr2;
     wire [31:0] rf_rdata1;
     wire [31:0] rf_rdata2;
-    wire        rf_we;
-    wire [3:0]  rf_waddr;
-    wire [31:0] rf_wdata;
+
+    // ─── Execute outputs ────────────────────────────────────────
+    wire [4:0]  ex_rd;
+    wire [31:0] ex_result;
+    wire        ex_reg_we;
+    wire        ex_illegal;
+    wire [31:0] ex_addr;
+    wire        ex_mem_req;
+    wire        ex_mem_we;
+    wire [3:0]  ex_mem_be;
+    wire [31:0] ex_store_data;
+
+    // ─── Forwarding ─────────────────────────────────────────────
+    // EX beats WB: it is the younger writer and holds the value the consumer
+    // would otherwise have to wait a cycle for.
+    wire [31:0] id_rdata1 =
+        (d_valid && d_reg_we && (d_rd != BRAD_R0) && (d_rd == id_raddr1)) ? ex_result :
+        (w_valid && w_reg_we && (w_rd != BRAD_R0) && (w_rd == id_raddr1)) ? w_result :
+        rf_rdata1;
+
+    wire [31:0] id_rdata2 =
+        (d_valid && d_reg_we && (d_rd != BRAD_R0) && (d_rd == id_raddr2)) ? ex_result :
+        (w_valid && w_reg_we && (w_rd != BRAD_R0) && (w_rd == id_raddr2)) ? w_result :
+        rf_rdata2;
+
+    // ─── Submodules ─────────────────────────────────────────────
+    brad_decode decode (
+        .clk(clk), .rst_n(rst_n),
+        .fetch_valid(f_valid), .fetch_pc(f_pc), .fetch_insn(f_insn),
+        .stall(1'b0), .flush(branch_taken),
+        .rf_raddr1(id_raddr1), .rf_rdata1(id_rdata1),
+        .rf_raddr2(id_raddr2), .rf_rdata2(id_rdata2),
+        .dec_valid(d_valid), .dec_opcode(d_opcode), .dec_rd(d_rd),
+        .dec_rs1(d_rs1), .dec_rs2(d_rs2),
+        .dec_rs1_val(d_rs1_val), .dec_rs2_val(d_rs2_val),
+        .dec_pc(d_pc), .dec_imm(d_imm), .dec_reg_we(d_reg_we),
+        .dec_undef(d_undef), .dec_fmt(d_fmt)
+    );
+
+    brad_execute execute (
+        .dec_valid(d_valid), .dec_opcode(d_opcode), .dec_rd(d_rd),
+        .dec_rs1(d_rs1), .dec_rs2(d_rs2),
+        .dec_rs1_val(d_rs1_val), .dec_rs2_val(d_rs2_val),
+        .dec_pc(d_pc), .dec_imm(d_imm), .dec_reg_we(d_reg_we),
+        .dec_undef(d_undef), .dec_fmt(d_fmt),
+        .dmem_rdata(dmem_rdata),
+        .ex_rd(ex_rd), .ex_result(ex_result), .ex_reg_we(ex_reg_we),
+        .ex_illegal(ex_illegal),
+        .ex_addr(ex_addr), .ex_mem_req(ex_mem_req), .ex_mem_we(ex_mem_we),
+        .ex_mem_be(ex_mem_be), .ex_store_data(ex_store_data),
+        .branch_taken(branch_taken), .branch_target(branch_target)
+    );
 
     brad_regfile regfile (
         .clk(clk), .rst_n(rst_n),
-        .raddr1(rf_raddr1), .rdata1(rf_rdata1),
-        .raddr2(rf_raddr2), .rdata2(rf_rdata2),
-        .we(rf_we), .waddr(rf_waddr), .wdata(rf_wdata)
+        .raddr1(id_raddr1), .rdata1(rf_rdata1),
+        .raddr2(id_raddr2), .rdata2(rf_rdata2),
+        .we(w_valid && w_reg_we), .waddr(w_rd), .wdata(w_result)
     );
 
-    // ─── Hazard detection ─────────────────────────────────────
-    // RAW hazard: the instruction in Fetch reads a register that the
-    // instruction in Decode will write at its Decode->Execute commit posedge.
-    // Stalling Fetch one cycle lets that write land before the dependent
-    // instruction samples the register file.
-    //
-    // The RRR ops and STW are the instructions that actually consume the rs2
-    // field; ADDI, LDW, BZ, BNZ and JMP ignore it.  Testing rs2 only for STW
-    // (as this used to) left the register-file read port pinned to r0 for
-    // every RRR op -- ADD/SUB/MUL/AND/OR/XOR/SHL/SHR silently computed
-    // rd = rs1 op r0.  The gate has to match what the instruction reads, or
-    // the hazard unit lies about dependencies that are real.
-    wire raw_uses_rs2 = (raw_op <= BRAD_OP_SHR) || (raw_op == BRAD_OP_STW);
-    wire raw_hazard = f_valid && d_valid && d_reg_we && (d_rd != BRAD_R0) &&
-                      ((raw_rs1 == d_rd) || (raw_uses_rs2 && (raw_rs2 == d_rd)));
-    wire stall = raw_hazard;
-
-    // ─── Fetch stage ──────────────────────────────────────────
+    // ─── Fetch ──────────────────────────────────────────────────
     assign imem_addr = pc;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            pc <= 32'd0;
+            pc      <= 32'd0;
             f_valid <= 1'b0;
             f_pc    <= 32'd0;
             f_insn  <= 32'd0;
         end else if (branch_taken) begin
-            // Flush on branch
+            // The instruction being fetched and the one in decode are both
+            // wrong-path.  Redirect, and spend one cycle refilling.
+            pc      <= branch_target;
             f_valid <= 1'b0;
-            pc      <= next_pc;
-        end else if (!stall) begin
+        end else begin
             f_valid <= 1'b1;
             f_pc    <= pc;
             f_insn  <= imem_rdata;
@@ -100,99 +144,29 @@ module brad_core (
         end
     end
 
-    // ─── Decode stage ─────────────────────────────────────────
-    wire [3:0]  raw_op = f_insn[BRAD_OPCODE_SHIFT +: 4];
-    wire [3:0]  raw_rd = f_insn[BRAD_RD_SHIFT     +: 4];
-    wire [3:0]  raw_rs1 = f_insn[BRAD_RS1_SHIFT   +: 4];
-    wire [3:0]  raw_rs2 = f_insn[BRAD_RS2_SHIFT   +: 4];
-    wire [15:0] raw_imm = f_insn[15:0];
-
+    // ─── Writeback ──────────────────────────────────────────────
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            d_valid   <= 1'b0;
-            d_pc      <= 32'd0;
-            d_opcode  <= 4'd0;
-            d_rd      <= 4'd0;
-            d_rs1     <= 4'd0;
-            d_rs2     <= 4'd0;
-            d_rs1_val <= 32'd0;
-            d_rs2_val <= 32'd0;
-            d_imm     <= 32'd0;
-            d_reg_we  <= 1'b0;
-        end else if (branch_taken) begin
-            d_valid <= 1'b0;
-        end else if (stall) begin
-            // The producer in Decode has already committed its writeback
-            // through the Decode-driven write port this posedge; draining
-            // Decode lets the Fetch-vs-Decode hazard release cleanly.
-            d_valid <= 1'b0;
+            w_valid  <= 1'b0;
+            w_rd     <= 5'd0;
+            w_result <= 32'd0;
+            w_reg_we <= 1'b0;
         end else begin
-            d_valid   <= f_valid;
-            d_pc      <= f_pc;
-            d_opcode  <= raw_op;
-            d_rd      <= raw_rd;
-            d_rs1     <= raw_rs1;
-            d_rs2     <= raw_rs2;
-            d_rs1_val <= rf_rdata1;
-            d_rs2_val <= rf_rdata2;
-            d_imm     <= { {16{raw_imm[15]}}, raw_imm };
-            // Writeback enable for ALU/ADDI/LDW (not STW/branches/JMP)
-            d_reg_we  <= (raw_op <= BRAD_OP_ADDI) || (raw_op == BRAD_OP_LDW);
+            w_valid  <= d_valid;
+            w_rd     <= ex_rd;
+            w_result <= ex_result;
+            w_reg_we <= ex_reg_we;
         end
     end
 
-    // ─── Execute + Writeback (Decode-driven) ─────────────────
-    // The ALU and the writeback data mux are purely combinational on the
-    // Decode-stage instruction, so the register-file write commits at the
-    // same posedge the instruction leaves Decode for Execute.  The
-    // Fetch-vs-Decode hazard above stalls Fetch for exactly one cycle when a
-    // dependent instruction would otherwise collide with that write.
-    reg  [31:0] alu_result;
+    // ─── Memory port ────────────────────────────────────────────
+    assign dmem_addr  = ex_addr;
+    assign dmem_req   = ex_mem_req;
+    assign dmem_we    = ex_mem_we;
+    assign dmem_be    = ex_mem_be;
+    assign dmem_wdata = ex_store_data;
 
-    // ALU
-    wire [31:0] alu_a = d_rs1_val;
-    wire [31:0] alu_b = d_rs2_val;
-    always @(*) begin
-        case (d_opcode)
-            BRAD_OP_ADD: alu_result = alu_a + alu_b;
-            BRAD_OP_SUB: alu_result = alu_a - alu_b;
-            BRAD_OP_MUL: alu_result = alu_a * alu_b;
-            BRAD_OP_AND: alu_result = alu_a & alu_b;
-            BRAD_OP_OR:  alu_result = alu_a | alu_b;
-            BRAD_OP_XOR: alu_result = alu_a ^ alu_b;
-            BRAD_OP_SHL: alu_result = alu_a << alu_b[4:0];
-            BRAD_OP_SHR: alu_result = alu_a >> alu_b[4:0];
-            default:     alu_result = 32'd0;
-        endcase
-    end
-
-    // Branch resolution (Decode-stage)
-    wire bz_taken   = (d_opcode == BRAD_OP_BZ) && (d_rs1_val == 32'd0);
-    wire bnz_taken  = (d_opcode == BRAD_OP_BNZ) && (d_rs1_val != 32'd0);
-    wire jmp_taken  = (d_opcode == BRAD_OP_JMP);
-    wire call_taken = (d_opcode == BRAD_OP_CALL);
-    wire ret_taken  = (d_opcode == BRAD_OP_RET);
-    assign branch_taken = d_valid && (bz_taken | bnz_taken | jmp_taken | call_taken | ret_taken);
-    // BR/JMP/CALL target: PC+4 + (sext(offset) * 4)  -- offset is a word offset
-    wire [31:0] br_target = d_pc + 32'd4 + {d_imm[29:0], 2'b00};
-    assign next_pc = ret_taken ? d_rs1_val : br_target;
-
-    // ─── Writeback to register file ───────────────────────────
-    // CALL saves PC+4 to the link register; otherwise rd gets the ALU/ADDI
-    // result or the single-cycle load data.
-    wire [31:0] wb_result = (d_opcode == BRAD_OP_CALL) ? (d_pc + 32'd4)
-                          : (d_opcode <= BRAD_OP_SHR) ? alu_result
-                          : (d_opcode == BRAD_OP_ADDI) ? (d_rs1_val + d_imm)
-                          : 32'd0;
-    assign rf_we    = d_valid && ( (d_reg_we && (d_rd != BRAD_R0)) ||
-                                   (d_opcode == BRAD_OP_CALL) );
-    assign rf_waddr = (d_opcode == BRAD_OP_CALL) ? BRAD_LR : d_rd;
-    assign rf_wdata = (d_opcode == BRAD_OP_LDW) ? dmem_rdata : wb_result;
-
-    // Memory port outputs (single-cycle memory; address/data from Decode)
-    assign dmem_addr  = d_rs1_val + d_imm;
-    assign dmem_req   = d_valid && (d_opcode == BRAD_OP_LDW || d_opcode == BRAD_OP_STW);
-    assign dmem_we    = d_valid && (d_opcode == BRAD_OP_STW);
-    assign dmem_wdata = d_rs2_val;
+    // ─── Fault ──────────────────────────────────────────────────
+    assign fault = ex_illegal;
 
 endmodule

@@ -14,6 +14,11 @@
 \usepackage{multirow}
 \usepackage{enumitem}
 
+\lstdefinestyle{Bits}{% bit-field diagrams: no line numbers, small enough to fit
+  language={},basicstyle=\ttfamily\scriptsize,numbers=none,breaklines=false,
+  frame=none,showstringspaces=false,columns=fullflexible,keepspaces=true,
+  aboveskip=6pt,belowskip=10pt,xleftmargin=2pt
+}
 \lstdefinestyle{Cstyle}{
   language=C,
   basicstyle=\ttfamily\footnotesize,
@@ -39,15 +44,15 @@
 
 \hypersetup{
   colorlinks=true,
-  pdftitle={BradISA V1 Specification},
+  pdftitle={BradISA V2 Specification},
   pdfauthor={Brad Devices},
 }
 
 \usepackage{bradbrand}
 
 \begin{document}
-\bradtitlepage{BradISA V1}{%
-  \textbf{BradISA V1}}{%
+\bradtitlepage{BradISA V2}{%
+  \textbf{BradISA V2}}{%
   Instruction Set Architecture Specification}{%
   Revision 1.0 --- Kinetic Gen1 --- July 2026}
 \newpage
@@ -57,10 +62,104 @@
 
 \section{Introduction}
 
-BradISA V1 (Kinetic Gen1) is a 32-bit fixed-length RISC instruction set architecture
-designed for the Brad Devices BradCore processor family. It provides 16 general-purpose
-registers, 16 opcodes encoded in a 4-bit primary opcode field, and three primary
-instruction formats.
+BradISA V2 (Kinetic Gen2) is a 32-bit fixed-length RISC instruction set
+architecture designed for the Brad Devices BradCore processor family. It
+provides 32 general-purpose registers, 64 opcodes encoded in a 6-bit primary
+opcode field, and seven instruction formats, each of which is exactly 32 bits
+wide.
+
+V2 supersedes V1 in full. It is a clean break: every instruction encoding
+changes, and none of V1's encodings are preserved. That is a deliberate
+consequence of the field widths --- growing a register field from four bits to
+five shifts every field above it, so no compatibility-preserving arrangement
+exists once the register file grows. The cost is nil today, because no V1
+binary has ever executed on silicon; the same break after a toolchain ships
+would be a migration.
+
+\subsection{Why V2 exists}
+
+V1 cannot be compiled. Its RI format carries a 16-bit sign-extended immediate
+and no instruction loads a wide constant, so the addressable range from any base
+register is $\pm$32\,KiB. There is therefore no data segment beyond 64\,KiB, no
+heap, no array longer than 16,384 elements and no linked executable --- which
+means no C library. V1 has no indirect jump, so no function pointers, no
+virtual calls and no callbacks.
+
+The three missing instruction groups are a symptom rather than the disease.
+V1's sixteen opcodes are fully allocated, \texttt{0x0} \texttt{ADD} through
+\texttt{0xF} \texttt{RET}, with none free. The property the V1 design document held
+up as its central argument --- a sixteen-case scalar decoder with no decode
+hierarchy --- is precisely the property that prevents it growing. An ISA cannot
+have both a small exhaustive opcode space and the ability to address memory.
+
+\subsection{Why 64 opcodes rather than 32}
+
+An earlier proposal in this review recommended a 5-bit field, 32 opcodes. The
+arithmetic does not support it. Clang's integer subset alone requires:
+
+\begin{table}[htbp]
+\centering
+\caption{Integer instructions a compiler emits, against opcode-space size}
+\begin{tabular}{lp{8.6cm}r}
+\toprule
+Group & Instructions & Count \\
+\midrule
+ALU, register-register   & ADD SUB MUL MULHU DIV DIVU REM REMU AND OR XOR SHL SHR SAR & 12 \\
+ALU, register-immediate  & ADDI ANDI ORI XORI SLLI SRLI SRAI SLTI SLTIU & 9 \\
+Load / store             & LDW LHU LHBU STW SH SB & 6 \\
+Upper immediate          & LUI AUIPC & 2 \\
+Control transfer         & NOP JMP JAL CALL JALR RET FENCE & 6 \\
+Branches                 & BEQ BNE BLT BGE BLTU BGEU BZ BNZ & 8 \\
+Atomics                  & LR.W SC.W AMOSWAP.W AMOADD.W & 4 \\
+\midrule
+Total                    &  & 50 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A 32-slot space is eleven slots short of the fifty instructions above. Closing
+that gap at 5 bits requires either folding the register-immediate ALU variants
+behind a \texttt{funct} field --- reintroducing the sub-hierarchy the V1 design
+explicitly rejected --- or deferring atomics to a third encoding break. V2 takes
+neither cost and spends one more bit.
+
+\begin{table}[htbp]
+\centering
+\caption{Opcode-space arithmetic}
+\begin{tabular}{lll}
+\toprule
+Field width & Slots & Verdict \\
+\midrule
+4 bits & 16 & V1. Short by 34. \\
+5 bits & 32 & Short by 18 against 50. \\
+6 bits & 64 & Fits, with 14 slots reserved and accounted for. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Why six bits is not new to this project}
+
+The vector core already implements this encoding.
+
+\begin{lstlisting}[style=Cstyle]
+  src/rtl/bradvector_core.v:27   localparam REG_ADDR_W = 5
+  src/rtl/bradvector_core.v:28   localparam NUM_REGS     = 32
+  src/rtl/bradvector_core.v:41   wire [4:0] slot0_opcode
+\end{lstlisting}
+
+The scalar ISA was the outlier that never grew. V2 ports the vector core's
+proven field widths to the scalar side, so the argument for the change is
+consistency between two cores already in the same repository rather than a new
+mechanism.
+
+\subsection{Data Model}
+\begin{itemize}[nosep]
+  \item \textbf{Word size:} 32 bits (4 bytes)
+  \item \textbf{Address space:} 32-bit byte-addressed
+  \item \textbf{Page size:} 4096 bytes (4\,KiB)
+  \item \textbf{Endianness:} Little-endian
+  \item \textbf{Instruction length:} 32 bits, fixed
+\end{itemize}
 
 \subsection{Data Model}
 \begin{itemize}[nosep]
@@ -74,7 +173,7 @@ instruction formats.
 \subsection{Pipeline Models}
 BradISA defines two pipeline models:
 
-\begin{table}[H]
+\begin{table}[htbp]
 \centering
 \caption{Pipeline model comparison}
 \begin{tabular}{lcc}
@@ -97,291 +196,542 @@ Target frequency      & 3.0--5.2\,GHz      & 2.4--3.6\,GHz    \\
 
 \section{Register File}
 
-BradISA V1 provides 16~32-bit general-purpose registers, numbered {\tt r0}
-through {\tt r15}. Register {\tt r0} is hardwired to zero; writes to {\tt r0}
+BradISA V2 provides 32~32-bit general-purpose registers, numbered {\tt r0}
+through {\tt r31}. Register {\tt r0} is hardwired to zero; writes to {\tt r0}
 are silently discarded.
 
+\subsection{Why V2 grew the register file}
+
+V1 provided sixteen registers. Widening the register fields from four bits to
+five is the same one-bit change as widening the opcode, and it brings the
+scalar core into line with the vector core, which already ships
+\texttt{REG\_ADDR\_W = 5} and \texttt{NUM\_REGS = 32}.
+
+The motivation is not the field width. It is the ABI. V1 allocated its sixteen
+registers as four arguments, three temporaries, five callee-saved, a stack
+pointer, a link register and a read-only program counter, which left a register
+allocator roughly eight usable registers and the calling convention four
+parameters. Every call past the fourth spilled. A compiler can be written for
+such an ABI and it will work, but it will spill continuously, and no backend
+quality survives it.
+
+V2 settles this in \S\ref{sec:abi}: eight argument registers, six temporaries,
+eleven callee-saved, and no architectural PC register.
+
 \subsection{ABI Convention}
-\begin{table}[H]
+\label{sec:abi}
+
+\textbf{Decision.} V2 passes arguments in eight registers, holds six
+temporaries and eleven callee-saved, and \textbf{retires the architectural PC
+register}. The shape is x86-32's argument count on a RISC-V register budget.
+The PC pseudo-register occupied one of thirty-two slots while being
+unencodable as {\tt rd}, {\tt rs1} or {\tt rs2}; removing it costs nothing,
+because {\tt AUIPC} already supplies PC-relative addressing and an explicit
+``read the PC'' operation can take a reserved opcode when one is wanted.
+
+\begin{table}[htbp]
 \centering
-\caption{Application Binary Interface register map}
-\begin{tabular}{cll}
+\caption{Application Binary Interface register map (32 registers)}
+\begin{tabular}{cllp{5.4cm}}
 \toprule
-Register & ABI Name  & Purpose \\
+Register & ABI Name & Count & Purpose \\
 \midrule
-{\tt r0}  & {\tt zero} & Hardwired zero \\
-{\tt r1}  & {\tt a0}   & Argument~\#0 / return value \\
-{\tt r2}  & {\tt a1}   & Argument~\#1 \\
-{\tt r3}  & {\tt a2}   & Argument~\#2 \\
-{\tt r4}  & {\tt a3}   & Argument~\#3 \\
-{\tt r5}  & {\tt t0}   & Temporary~\#0 \\
-{\tt r6}  & {\tt t1}   & Temporary~\#1 \\
-{\tt r7}  & {\tt t2}   & Temporary~\#2 \\
-{\tt r8}  & {\tt s0}   & Callee-saved~\#0 \\
-{\tt r9}  & {\tt s1}   & Callee-saved~\#1 \\
-{\tt r10} & {\tt s2}   & Callee-saved~\#2 \\
-{\tt r11} & {\tt s3}   & Callee-saved~\#3 \\
-{\tt r12} & {\tt s4}   & Callee-saved~\#4 \\
-{\tt r13} & {\tt sp}   & Stack pointer \\
-{\tt r14} & {\tt lr}   & Link register \\
-{\tt r15} & {\tt pc}   & Program counter (read-only) \\
+{\tt r0}       & {\tt zero} & 1  & Hardwired zero; writes discarded \\
+{\tt r1}--{\tt r8}   & {\tt a0}--{\tt a7} & 8  & Arguments~\#0--\#7; {\tt a0} also returns \\
+{\tt r9}--{\tt r14}  & {\tt t0}--{\tt t5} & 6  & Caller-saved temporaries \\
+{\tt r15}      & {\tt lr}  & 1  & Link register; return address on {\tt CALL} \\
+{\tt r16}--{\tt r26} & {\tt s0}--{\tt s10} & 11 & Callee-saved \\
+{\tt r27}      & {\tt sp}  & 1  & Stack pointer \\
+{\tt r28}      & {\tt gp}  & 1  & Global pointer \\
+{\tt r29}      & {\tt tp}  & 1  & Thread pointer \\
+{\tt r30}--{\tt r31} & ---   & 2  & Reserved \\
 \bottomrule
 \end{tabular}
 \end{table}
 
+Twenty-nine of thirty-two registers are allocatable: one is hardwired zero and
+two are reserved for growth. The arithmetic is checked rather than asserted --
+8 arguments + 6 temporaries + 11 callee-saved + \texttt{lr} + \texttt{sp} +
+\texttt{gp} + \texttt{tp} = 29.
+
+\subsection{Why this shape}
+
+V1 allocated sixteen registers as four arguments, three temporaries, five
+callee-saved, a stack pointer, a link register and a read-only program
+counter. That left a register allocator roughly eight usable registers and the
+calling convention four parameters, so every call past the fourth spilled to
+the stack. A compiler can be written for that ABI and it will work --- it will
+also spill continuously, and no backend quality survives it.
+
+The alternative candidate was RISC-V's seven arguments. Eight was chosen
+because the register file can afford it, because eight is the better-trodden
+count for a 32-bit integer ABI, and because every argument beyond the register
+set costs a store and a reload at both ends of every call.
+
+Sixteen callee-saved and reserved slots remain unallocated on purpose. They are
+where a vector calling convention, a software-pipeline temporaries group and
+any future banked or rotate arrangement would go, and they are named as
+reserved rather than left unassigned.
+
+\subsection{Decision record}
+
+The encoding was fixed before this convention was chosen, deliberately. Growing
+a register field from four bits to five shifts every field above it, so the
+encoding had to be settled first, and the convention is the part that could be
+decided afterwards on evidence. It cost nothing to leave open for exactly that
+length of time.
+
+Two open questions became this one. How many arguments --- seven or eight ---
+and whether to keep a read-only PC register. Both are answered above.
+
 \subsection{Calling Convention}
 \begin{itemize}[nosep]
-  \item Arguments 0--3 are passed in {\tt r1--r4}. Additional arguments are
-        passed on the stack.
-  \item Return value is placed in {\tt r1}.
-  \item Callee-saved registers {\tt r8--r12} must be preserved across function
-        calls.
-  \item The link register {\tt r14} holds the return address on {\tt CALL}.
-  \item The stack grows downward; {\tt r13 (sp)} must point to the last used
-        stack slot.
+  \item Arguments 0--7 are passed in {\tt r1}--{\tt r8}. Additional arguments are
+        passed on the stack, right to left.
+  \item Return value is placed in {\tt a0} ({\tt r1}).
+  \item Callee-saved registers {\tt s0}--{\tt s10} must be preserved across
+        function calls. {\tt t0}--{\tt t5} and {\tt a0}--{\tt a7} may be
+        clobbered.
+  \item The link register {\tt lr} holds the return address on {\tt CALL} and
+        {\tt RET}.
+  \item The stack grows downward; {\tt sp} must point to the last used stack
+        slot, and the stack is 16-byte aligned on entry.
+  \item There is no red zone below {\tt sp}, and no leaf-function fast path that
+        omits the frame setup; a signal or exception may overwrite the
+        caller-saved area.
 \end{itemize}
 
 \newpage
 
 \section{Instruction Formats}
 
-All BradISA V1 instructions are 32~bits wide. The three primary formats are:
+All BradISA V2 instructions are 32~bits wide. Seven formats are defined, and
+every one of them sums to exactly 32 bits. That is not a coincidence to be
+checked by hand later; it is the property the V1 specification failed to hold,
+see \S\ref{sec:v1-encoding-defects}.
 
-\begin{table}[H]
+\begin{table}[htbp]
 \centering
 \caption{Instruction format field layout}
-\begin{tabular}{clllll}
+\begin{tabular}{clllllll}
 \toprule
-Format  & Bits [31:28] & [27:24] & [23:20] & [19:16] & [15:0] \\
+Format  & [31:26] & [25:21] & [20:16] & [15:11] & [10:6] & [5:0] \\
 \midrule
-{\tt RRR} & opcode       & rd      & rs1     & rs2     & --- \\
-{\tt RI}  & opcode       & rd      & rs1     & ---     & immediate \\
-{\tt BR}  & opcode       & ---     & rs1     & ---     & offset ($\times$4) \\
-{\tt JMP} & opcode       & ---     & ---     & ---     & offset ($\times$4) \\
+{\tt RRR} & op & rd & rs1 & rs2 & --- & --- \\
+{\tt RI}  & op & rd & rs1 & \multicolumn{4}{c}{imm[15:0]} \\
+{\tt SI}  & op & rs2 & rs1 & \multicolumn{4}{c}{imm[15:0]} \\
+{\tt BR}  & op & rs1 & rs2 & \multicolumn{4}{c}{offset[15:0]} \\
+{\tt IJ}  & op & rd & rs1 & \multicolumn{4}{c}{imm[15:0]} \\
+{\tt JMP} & op & rd & \multicolumn{5}{c}{offset[20:0]} \\
+{\tt U}   & op & rd & \multicolumn{5}{c}{imm[20:0]} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\subsection{RRR Format --- Register-to-Register ALU}
-Used by all eight ALU instructions (ADD, SUB, MUL, AND, OR, XOR, SHL, SHR).
+\subsection{RRR --- Register-to-Register ALU}
 
-\begin{figure}[H]
-\centering
-\begin{tikzpicture}[x=0.48cm]
-  \bwfield{32}{RRR --- register-to-register ALU}
-  \bwslicen{28}{4}{op}
-  \bwslicen{24}{4}{rd}
-  \bwslicen{20}{4}{rs1}
-  \bwslicen{16}{4}{rs2}
-  \bwsliceh{0}{16}{16\textquoteright b0}
-\end{tikzpicture}
-\caption{RRR format --- 32-bit register-to-register encoding (gold = field, grey = reserved/zero)}
-\end{figure}
+\begin{lstlisting}[style=Bits]
+ +--------+-------+-------+-------+--------+
+ | op     | rd    | rs1   | rs2   | 0      |
+ +--------+-------+-------+-------+--------+   RRR
+\end{lstlisting}
 
 \[
-\texttt{instruction[31:0]} = \{ \texttt{op[3:0]}, \texttt{rd[3:0]}, \texttt{rs1[3:0]}, \texttt{rs2[3:0]}, 16\textrm{\textquoteright}b0 \}
+\texttt{instruction[31:0]} = \{\, \texttt{op[5:0]}, \texttt{rd[4:0]},
+  \texttt{rs1[4:0]}, \texttt{rs2[4:0]}, 11\textrm{\textquoteright}b0 \,\}
 \]
 
-\subsection{RI Format --- Register-Immediate}
-Used by ADDI, LDW, and STW.
+Bits [10:0] are reserved and must be zero. A non-zero value in a reserved field
+is an illegal instruction, not a synonym for zero, so that encodings do not
+acquire two spellings.
 
-\begin{figure}[H]
-\centering
-\begin{tikzpicture}[x=0.48cm]
-  \bwfield{32}{RI --- register-immediate}
-  \bwslicen{28}{4}{op}
-  \bwslicen{24}{4}{rd}
-  \bwslicen{20}{4}{rs1}
-  \bwsliceh{16}{16}{imm[15:0]}
-\end{tikzpicture}
-\caption{RI format --- register-immediate encoding (sign-extended immediate)}
-\end{figure}
+\subsection{RI --- Register-Immediate}
+
+Used by ADDI, ANDI, ORI, XORI, the shift-immediates, the set-less-thans and
+every load.
+
+\begin{lstlisting}[style=Bits]
+ +--------+-------+-------+--------------+
+ | op     | rd    | rs1   | imm          |
+ +--------+-------+-------+--------------+   RI
+\end{lstlisting}
 
 \[
-\texttt{instruction[31:0]} = \{ \texttt{op[3:0]}, \texttt{rd[3:0]}, \texttt{rs1[3:0]}, \texttt{imm[15:0]} \}
+\texttt{instruction[31:0]} = \{\, \texttt{op[5:0]}, \texttt{rd[4:0]},
+  \texttt{rs1[4:0]}, \texttt{imm[15:0]} \,\}
 \]
-The 16-bit immediate is sign-extended to 32 bits before use.
 
-\subsection{BR Format --- Branch}
-Used by BZ and BNZ.
+The 16-bit immediate is sign-extended to 32 bits before use, except for
+\texttt{ANDI}, \texttt{ORI} and \texttt{XORI}, which zero-extend it, because
+those are bitwise operations and sign extension would be a different operation.
 
-\begin{figure}[H]
-\centering
-\begin{tikzpicture}[x=0.48cm]
-  \bwfield{32}{BR --- conditional branch}
-  \bwslicen{28}{4}{op}
-  \bwsliceh{24}{4}{0}
-  \bwslicen{20}{4}{rs1}
-  \bwsliceh{16}{4}{0}
-  \bwslicen{0}{16}{offset[15:0]}
-\end{tikzpicture}
-\caption{BR format --- 16-bit word offset (``$\times$4'' at encode time, $\pm$128\,KiB range)}
-\end{figure}
+\subsection{SI --- Store-Immediate}
+
+Identical bit layout to RI. The register field at [25:21] is the \emph{source}
+of the stored value rather than a destination.
+
+\begin{lstlisting}[style=Bits]
+ +--------+-------+-------+--------------+
+ | op     | rs2   | rs1   | imm          |
+ +--------+-------+-------+--------------+   SI
+\end{lstlisting}
+
+\subsection{BR --- Conditional Branch}
+
+\begin{lstlisting}[style=Bits]
+ +--------+-------+-------+--------------+
+ | op     | rs1   | rs2   | offset       |
+ +--------+-------+-------+--------------+   BR
+\end{lstlisting}
 
 \[
-\texttt{instruction[31:0]} = \{ \texttt{op[3:0]}, 4\textrm{\textquoteright}b0, \texttt{rs1[3:0]}, 4\textrm{\textquoteright}b0, \texttt{offset[15:0]} \}
+\texttt{PC} = \texttt{insn\_pc} + 4 + \big(\texttt{sign\_extend(offset[15:0])} \times 4\big)
 \]
-The branch offset is encoded in \textbf{words} (multiplied by 4 at encode time).
-At execution, the target address is:
-\[
-\texttt{PC} = \texttt{insn\_pc} + 4 + \texttt{sign\_extend(offset[15:0])}
-\]
-Branch offsets are therefore $\pm$128\,KiB from the instruction.
 
-\subsection{JMP Format --- Unconditional Jump / Call}
-Used by JMP and CALL.
+Branch offsets are therefore $\pm$128\,KiB from the instruction. \texttt{BZ} and
+\texttt{BNZ} use this format with \texttt{rs2} = 0, which is why they need no
+separate encoding.
 
-\begin{figure}[H]
-\centering
-\begin{tikzpicture}[x=0.48cm]
-  \bwfield{32}{JMP / CALL --- unconditional}
-  \bwslicen{28}{4}{op}
-  \bwsliceh{24}{4}{0}
-  \bwslicen{20}{4}{0}
-  \bwsliceh{16}{4}{0}
-  \bwslicen{0}{16}{offset[15:0]}
-\end{tikzpicture}
-\caption{JMP/CALL format --- 16-bit word offset (``$\times$4'' at encode time, $\pm$128\,KiB range)}
-\end{figure}
+\subsection{IJ --- Indirect Jump}
+
+\begin{lstlisting}[style=Bits]
+ +--------+-------+-------+--------------+
+ | op     | rd    | rs1   | imm          |
+ +--------+-------+-------+--------------+   IJ
+\end{lstlisting}
+
+\texttt{JALR}: the target is computed and the link written before the transfer,
+so that \texttt{jalr ra, ra, 0} is a correct tail call.
+
+\subsection{JMP --- Unconditional Jump and Call}
+
+\begin{lstlisting}[style=Bits]
+ +--------+-------+----------------+
+ | op     | rd    | offset         |
+ +--------+-------+----------------+   JMP
+\end{lstlisting}
 
 \[
-\texttt{instruction[31:0]} = \{ \texttt{op[3:0]}, 12\textrm{\textquoteright}b0, \texttt{offset[15:0]} \}
+\texttt{PC} = \texttt{insn\_pc} + 4 + \big(\texttt{sign\_extend(offset[20:0])} \times 4\big)
 \]
-The jump offset is in words ($\times$4). Target address:
+
+Unconditional jump range is $\pm$4\,MiB, unchanged from V1. The V1 encoding
+spent eight bits on padding; V2 spends five of them on a real \texttt{rd}, which
+is what \texttt{JAL} needs to return an address.
+
+\subsection{U --- Upper Immediate}
+
+\begin{lstlisting}[style=Bits]
+ +--------+-------+----------------+
+ | op     | rd    | imm            |
+ +--------+-------+----------------+   U
+\end{lstlisting}
+
 \[
-\texttt{PC} = \texttt{insn\_pc} + 4 + \texttt{sign\_extend(offset[15:0])}
+\texttt{LUI}: \quad \texttt{rd} = \texttt{sign\_extend(imm[20:0])} \ll 11
 \]
-Jump range is $\pm$128\,KiB, the same as the conditional branches. JMP and
-CALL share one encoding and one reach; a program needing a wider jump must be
-laid out with a veneer.
+\[
+\texttt{AUIPC}: \quad \texttt{rd} = \texttt{PC} + \big(\texttt{sign\_extend(imm[20:0])} \ll 11\big)
+\]
+
+21 immediate bits shifted left by 11 fills all 32 bits of the destination, so
+\texttt{LUI} followed by \texttt{ADDI} constructs any 32-bit constant. This is
+the instruction whose absence kept V1 from addressing memory.
 
 \subsection{RET --- Return}
-Not a fixed encoding. RET is a register-indirect jump selected by the opcode:
+
+Fixed encoding, with every non-opcode bit zero:
+
 \[
-\texttt{instruction[31:0]} = \{ \texttt{0xF[3:0]}, 4\textrm{\textquoteright}b0, \texttt{rs1[3:0]}, 8\textrm{\textquoteright}b0, \texttt{0x0000} \},
-\quad \texttt{PC} = \texttt{rs1}
+\texttt{RET} = 32\textrm{\textquoteright}h\texttt{B8000000}
 \]
-To return through the link register the instruction must name it, so RET
-assembles to {\tt 32'hF0E00000} (RS1 = 14 = {\tt lr}). RET does not modify
-{\tt lr}. The all-zero word {\tt 32'hF0000000} is a valid RET that returns to
-{\tt r0}, i.e. to address 0.
+
+\texttt{RET} jumps to the address in \texttt{r15 (lr)} and does not modify
+\texttt{lr}.
+
+\newpage
+
+\subsection{Encoding diagrams}
+
+\begin{lstlisting}[style=Bits]
+ +--------+-------+-------+-------+--------+
+ | op     | rd    | rs1   | rs2   | 0      |
+ +--------+-------+-------+-------+--------+   RRR
+
+ +--------+-------+-------+--------------+
+ | op     | rd    | rs1   | imm          |
+ +--------+-------+-------+--------------+   RI
+
+ +--------+-------+-------+--------------+
+ | op     | rs2   | rs1   | imm          |
+ +--------+-------+-------+--------------+   SI
+
+ +--------+-------+-------+--------------+
+ | op     | rs1   | rs2   | offset       |
+ +--------+-------+-------+--------------+   BR
+\end{lstlisting}
+
+\begin{lstlisting}[style=Bits]
+ +--------+-------+-------+--------------+
+ | op     | rd    | rs1   | imm          |
+ +--------+-------+-------+--------------+   IJ
+
+ +--------+-------+----------------+
+ | op     | rd    | offset         |
+ +--------+-------+----------------+   JMP
+
+ +--------+-------+----------------+
+ | op     | rd    | imm            |
+ +--------+-------+----------------+   U
+
+ +--------------------------------------------------------------+
+|                     0xB8000000                             |   RET
+ +--------------------------------------------------------------+
+\end{lstlisting}
+
+\subsection{Two encoding defects in V1, corrected here}
+\label{sec:v1-encoding-defects}
+
+Recorded because both were load-bearing for anything transcribed from this
+specification, and because a TableGen target is written directly against this
+table.
+
+\textbf{The V1 RI format did not describe a 32-bit word.} The field array
+summed to 28 bits ($4 + 4 + 4 + 16$), four short, and the accompanying diagram
+placed \texttt{imm[15:0]} at bits 31:16, overlapping \texttt{op}, \texttt{rd}
+and \texttt{rs1}. Two representations of one format, disagreeing, neither of
+them a 32-bit encoding.
+
+\textbf{V1 opcode \texttt{0xF} carried two meanings.} The scalar table assigned
+\texttt{0xF = RET}; the vector extension was specified as using opcode
+\texttt{0xF} for every one of its instructions, disambiguated by a class field
+in bits [27:25] with \texttt{0xF0000000} pinned as the sole \texttt{RET}
+encoding. The scalar and vector decoders therefore disagreed about the same
+four bits, and the entire vector extension depended on \texttt{RET} having
+exactly one encoding.
+
+V2 gives the vector unit its own opcode range (\S\ref{sec:vector-escape}) and
+every format sums to 32 bits.
 
 \newpage
 
 \section{Instruction Set}
 
-\begin{table}[H]
+\begin{table}[htbp]
 \centering
-\caption{Complete BradISA V1 instruction set}
-\begin{tabular}{cllc}
+\caption{Complete BradISA V2 integer instruction set}
+\begin{tabular}{cllp{7.4cm}}
 \toprule
 Opcode & Mnemonic & Format & Operation \\
 \midrule
-0x0 & ADD  & RRR & rd = rs1 + rs2 \\
-0x1 & SUB  & RRR & rd = rs1 - rs2 \\
-0x2 & MUL  & RRR & rd = rs1 $\times$ rs2 (low 32 bits) \\
-0x3 & AND  & RRR & rd = rs1 \& rs2 \\
-0x4 & OR   & RRR & rd = rs1 | rs2 \\
-0x5 & XOR  & RRR & rd = rs1 \^{} rs2 \\
-0x6 & SHL  & RRR & rd = rs1 $<<$ rs2[4:0] \\
-0x7 & SHR  & RRR & rd = rs1 $>>$ rs2[4:0] (logical) \\
+0x0 & NOP    & --- & no operation \\
+0x1 & ADD    & RRR & rd = rs1 + rs2 \\
+0x2 & SUB    & RRR & rd = rs1 - rs2 \\
+0x3 & MUL    & RRR & rd = rs1 $\times$ rs2 (low 32 bits) \\
+0x4 & MULHU  & RRR & rd = (rs1 $\times$ rs2)[63:32] unsigned \\
+0x5 & DIV    & RRR & rd = rs1 / rs2 signed, div-by-zero raises an exception \\
+0x6 & DIVU   & RRR & rd = rs1 / rs2 unsigned \\
+0x7 & REM    & RRR & rd = rs1 \% rs2 signed \\
+0x8 & REMU   & RRR & rd = rs1 \% rs2 unsigned \\
+0x9 & AND    & RRR & rd = rs1 \& rs2 \\
+0xA & OR     & RRR & rd = rs1 | rs2 \\
+0xB & XOR    & RRR & rd = rs1 \^{} rs2 \\
+0xC & SHL    & RRR & rd = rs1 $<<$ rs2[4:0] \\
+0xD & SHR    & RRR & rd = rs1 $>>$ rs2[4:0] (logical) \\
+0xE & SAR    & RRR & rd = rs1 $\gg_s$ rs2[4:0] (arithmetic) \\
+0xF & ---    & --- & reserved \\
 \midrule
-0x8 & ADDI & RI  & rd = rs1 + sext(imm16) \\
-0x9 & LDW  & RI  & rd = mem[rs1 + sext(imm16)] \\
-0xA & STW  & RI  & mem[rs1 + sext(imm16)] = rs2 \\
+0x10 & ADDI   & RI  & rd = rs1 + sext(imm) \\
+0x11 & ANDI   & RI  & rd = rs1 \& zext(imm) \\
+0x12 & ORI    & RI  & rd = rs1 | zext(imm) \\
+0x13 & XORI   & RI  & rd = rs1 \^{} zext(imm) \\
+0x14 & SLLI   & RI  & rd = rs1 $<<$ imm[4:0] \\
+0x15 & SRLI   & RI  & rd = rs1 $>>$ imm[4:0] (logical) \\
+0x16 & SRAI   & RI  & rd = rs1 $\gg_s$ imm[4:0] (arithmetic) \\
+0x17 & SLTI   & RI  & rd = (rs1 $<$ sext(imm)) ? 1 : 0 \\
+0x18 & SLTIU  & RI  & rd = (rs1 $<$ zext(imm)) ? 1 : 0 \\
+0x19--0x1B & --- & --- & reserved \\
+0x1C--0x1F & --- & --- & reserved \\
 \midrule
-0xB & BZ   & BR  & if (rs1 == 0) PC = insn\_pc + 4 + sext(offset$\times$4) \\
-0xC & BNZ  & BR  & if (rs1 != 0) PC = insn\_pc + 4 + sext(offset$\times$4) \\
-0xD & JMP  & JMP & PC = insn\_pc + 4 + sext(offset$\times$4) \\
-0xE & CALL & JMP & lr = insn\_pc + 4; PC = target \\
-0xF & RET  & JMP & PC = rs1 (name {\tt lr} to return) \\
+0x20 & LDW    & RI  & rd = mem[rs1 + sext(imm)] \\
+0x21 & LHU    & RI  & rd = zeroextend(mem16[rs1 + sext(imm)]) \\
+0x22 & LHBU   & RI  & rd = zeroextend(mem8[rs1 + sext(imm)]) \\
+0x23 & STW    & SI  & mem[rs1 + sext(imm)] = rs2 \\
+0x24 & SH     & SI  & mem16[rs1 + sext(imm)] = rs2[15:0] \\
+0x25 & SB     & SI  & mem8[rs1 + sext(imm)] = rs2[7:0] \\
+0x26--0x27 & --- & --- & reserved \\
+\midrule
+0x28 & LUI    & U   & rd = sext(imm) $<<$ 11 \\
+0x29 & AUIPC  & U   & rd = PC + (sext(imm) $<<$ 11) \\
+\midrule
+0x2A & JMP    & JMP & PC = insn\_pc + 4 + sext(offset $\times$ 4) \\
+0x2B & JAL    & JMP & rd = insn\_pc + 4; PC = target \\
+0x2C & CALL   & JMP & lr = insn\_pc + 4; PC = target \\
+0x2D & JALR   & IJ  & t = insn\_pc + 4; PC = (rs1 + sext(imm)) \& $\sim$1; rd = t \\
+0x2E & RET    & --- & PC = lr \\
+0x2F & FENCE  & --- & ordering barrier; no operand \\
+\midrule
+0x30 & BEQ    & BR  & if (rs1 == rs2) branch \\
+0x31 & BNE    & BR  & if (rs1 != rs2) branch \\
+0x32 & BLT    & BR  & if (rs1 $<$ rs2, signed) branch \\
+0x33 & BGE    & BR  & if (rs1 $\geq$ rs2, signed) branch \\
+0x34 & BLTU   & BR  & if (rs1 $<$ rs2, unsigned) branch \\
+0x35 & BGEU   & BR  & if (rs1 $\geq$ rs2, unsigned) branch \\
+0x36 & BZ     & BR  & if (rs1 == 0) branch \quad (rs2 = 0) \\
+0x37 & BNZ    & BR  & if (rs1 != 0) branch \quad (rs2 = 0) \\
+\midrule
+0x38 & LR.W    & AMO & rd = mem[rs1]; record reservation on rs1 \\
+0x39 & SC.W    & AMO & mem[rs1] = rs2; rd = 0 on success, non-zero on failure \\
+0x3A & AMOSWAP.W & AMO & t = mem[rs1]; mem[rs1] = rs2; rd = t \\
+0x3B & AMOADD.W  & AMO & t = mem[rs1]; mem[rs1] = t + rs2; rd = t \\
+\midrule
+0x3C--0x3F & --- & --- & reserved, extension space (see \S\ref{sec:vector-escape}) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Opcode allocation and what it buys}
+
+The 64 slots are allocated by group, and every unassigned slot is stated
+rather than left blank. This is the point of the exercise: an unassigned slot
+in a flat decoder is not a gap, it is an instruction word that executes as
+something nobody chose.
+
+\begin{table}[htbp]
+\centering
+\caption{Opcode group map}
+\begin{tabular}{clcl}
+\toprule
+Range & Group & Slots & Spare \\
+\midrule
+0x00--0x0F & ALU, register-register   & 15 & 1 \\
+0x10--0x1F & ALU, register-immediate & 9  & 7 \\
+0x20--0x27 & Load / store             & 6  & 2 \\
+0x28--0x29 & Upper immediate          & 2  & 0 \\
+0x2A--0x2F & Control transfer         & 6  & 0 \\
+0x30--0x37 & Branches                 & 8  & 0 \\
+0x38--0x3B & Atomics                  & 4  & 0 \\
+0x3C--0x3F & Extension escape         & 0  & 4 \\
+\midrule
+\textbf{Total} & & \textbf{50} & \textbf{14} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \subsection{ALU Operations}
-All ALU operations (opcodes 0x0--0x7) use the RRR format. The second source
-operand is a register ({\tt rs2}), not an immediate. {\tt MUL} produces the
-low 32 bits of the product. {\tt SHL} and {\tt SHR} use only the bottom 5 bits
-of {\tt rs2} as the shift amount (0--31).
+
+Register-register ALU instructions use the RRR format. Register-immediate ALU
+instructions use RI. Shift amounts use only the bottom five bits of the source
+(0--31), in both forms.
+
+Division and remainder are newly defined in V2 and raise an exception on a zero
+divisor rather than returning a defined value, because the alternative is a
+silent wrong answer.
 
 \subsection{Memory Operations}
-{\tt LDW} loads a 32-bit word from byte address {\tt rs1 + sext(imm16)} into
-{\tt rd}.  {\tt STW} stores the value of {\tt rs2} to the same effective
-address.  Addresses must be 4-byte aligned; an unaligned access raises an
-exception.
+
+{\tt LDW}, {\tt LHU} and {\tt LHBU} load into {\tt rd} from
+{\tt rs1 + sext(imm)}. {\tt STW}, {\tt SH} and {\tt SB} store the low 32, 16 or 8
+bits of {\tt rs2} to the same effective address, and are encoded with the SI
+format, in which the register field at bits [25:21] is the \emph{source}, not a
+destination.
+
+V1 used the RI shape for stores and documented this as ``STW ignores {\tt rd}
+(uses {\tt rs2} as store data)''. That is the same bit layout read with two
+different meanings depending on the opcode, which is exactly the sort of thing
+that costs a backend an afternoon. V2 names the two cases separately.
+
+Word accesses must be 4-byte aligned and halfword accesses 2-byte aligned. An
+unaligned access raises an exception; it is not silently split.
+
+\subsection{Addressing: how V2 reaches memory}
+
+This is the change that makes a compiler possible.
+
+In V1 the only addressable range from any base register was
+$\pm$32\,KiB, because the RI immediate was 16 bits and no instruction loaded a
+wide constant. V2 adds the U format:
+
+\begin{lstlisting}[style=Cstyle]
+  lui   r5, 0x123       # r5 = 0x123000
+  addi  r5, r5, 0x456   # r5 = 0x123456
+\end{lstlisting}
+
+Any 32-bit address is therefore two instructions, and any load or store reaches
+$\pm$32\,KiB around an arbitrary base. {\tt AUIPC} supplies the PC-relative form
+for position-independent code.
 
 \subsection{Conditional Branches}
-{\tt BZ} and {\tt BNZ} test {\tt rs1} against zero. The branch offset is a
-16-bit signed word offset ($\times$4) with a range of $\pm$128\,KiB. The
-branch target PC-relative computation uses the address of the instruction
-itself, not the next instruction:
+
+The BR format carries two registers, so compare-and-branch is a single
+instruction. V1 had only {\tt BZ} and {\tt BNZ}, which test one register against
+zero; every other comparison compiled to a {\tt SUB} followed by a zero test.
+
+Branches are PC-relative against the address of the instruction itself:
+
 \[
-\texttt{target} = \texttt{insn\_pc} + 4 + (\texttt{offset} \times 4)
+\texttt{target} = \texttt{insn\_pc} + 4 + (\texttt{sign\_extend(offset)} \times 4)
 \]
 
-\subsection{Call / Return}
-{\tt CALL} saves the return address ({\tt insn\_pc + 4}) into the link register
-{\tt r14 (lr)} and then jumps to the target. {\tt CALL} writes {\tt lr}
-unconditionally: the RD field is unused, and the assembler rejects a link
-register other than {\tt r14} rather than emitting a word that does something
-else. {\tt RET} is a register-indirect jump, {\tt PC = rs1}; naming {\tt lr}
-gives a simple leaf-function call/return mechanism.
+The offset is a 16-bit signed word offset, giving $\pm$128\,KiB of range. That
+is a deliberate choice: with AUIPC available, a branch further than 128\,KiB is
+two instructions, and spending bits on branch range would have cost either the
+immediate width or the opcode width, both of which are load-bearing.
+
+\subsection{Call, Return and Indirect Transfer}
+
+{\tt CALL} writes the return address into the link register and jumps. {\tt RET}
+jumps to the link register. {\tt JALR} is the indirect form, and is the
+instruction that makes function pointers, virtual calls and callbacks
+expressible --- V1 had no encoding for them at all, so plain C could not be
+compiled against the ISA.
+
+{\tt JALR} computes the target before writing the link, so a call through
+{\tt lr} behaves correctly:
+
+\begin{lstlisting}[style=Cstyle]
+  jalr  ra, ra, 0       # t = pc+4; pc = ra + 0; ra = t  -> correct tail position
+\end{lstlisting}
+
+\subsection{Atomics and Memory Ordering}
+
+{\tt LR.W} and {\tt SC.W} provide a load-reserved / store-conditional pair;
+{\tt AMOSWAP.W} and {\tt AMOADD.W} provide unconditional atomic memory
+operations. {\tt FENCE} is an ordering barrier with no operands.
+
+The V2 atomic set is deliberately minimal --- four instructions, which is what a
+working single-threaded and coarse-grained lock implementation needs. Bitwise
+atomic operations (AND, OR, XOR) are not in V2. They are not forgotten: the
+seven spare register-immediate slots and the four extension slots are where they
+go when codegen demand is measured rather than guessed.
+
+\subsection{Vector escape}
+\label{sec:vector-escape}
+
+Slots 0x3C--0x3F are reserved for extensions. The vector unit occupies this
+space with a class field in the bits below the opcode, so vector instructions
+are decoded from the same 64-entry table rather than sharing an opcode with a
+scalar instruction.
+
+In V1 the entire vector extension shared opcode {\tt 0xF} with {\tt RET}, and
+was distinguished only by the value of the remaining bits, with
+\texttt{0xF0000000} pinned as the sole {\tt RET} encoding. That is coherent as
+written and fragile in practice: the whole vector extension depends on {\tt RET}
+having exactly one encoding, and any future 32-bit pattern that collides becomes
+a vector instruction silently. V1 also shared opcode {\tt 0xF} with the vector
+opcode, so the scalar and vector decoders disagreed about what the same four
+bits meant. V2 removes both by giving the vector unit its own opcode range.
 
 \newpage
-
-\section{Instruction Encoding Diagrams}
-
-\subsection{RRR Format (ALU)}
-\begin{lstlisting}[style=Cstyle]
-  31  28 27  24 23  20 19  16 15                             0
-+------+------+------+------+--------------------------------+
-| op   | rd   | rs1  | rs2  |         0 (unused)             |
-+------+------+------+------+--------------------------------+
-\end{lstlisting}
-
-\subsection{RI Format (ADDI, LDW, STW)}
-\begin{lstlisting}[style=Cstyle]
-  31  28 27  24 23  20 19  16 15                             0
-+------+------+------+------+--------------------------------+
-| op   | rd   | rs1  |      |      signed immediate          |
-+------+------+------+------+--------------------------------+
-\end{lstlisting}
-Note: STW ignores {\tt rd} (uses {\tt rs2} as store data).
-
-\subsection{BR Format (BZ, BNZ)}
-\begin{lstlisting}[style=Cstyle]
-  31  28 27  24 23  20 19  16 15                             0
-+------+------+------+------+--------------------------------+
-| op   | 0000 | rs1  | 0000 |    word offset (x4)            |
-+------+------+------+------+--------------------------------+
-\end{lstlisting}
-
-\subsection{JMP Format (JMP, CALL)}
-\begin{lstlisting}[style=Cstyle]
-  31  28 27  24 23  20 19                                    0
-+------+------+------+----------------------------------------+
-| op   | 0000 | 0000 |         word offset (x4)               |
-+------+------+------+----------------------------------------+
-\end{lstlisting}
-
-\subsection{RET}
-\begin{lstlisting}[style=Cstyle]
-  31  28 27  24 23  20 19                                    0
-+------+------+------+----------------------------------------+
-| 0xF  | 0000 | rs1  |            0x0000                    |
-+------+------+------+----------------------------------------+
-          RET: PC = rs1.  rs1 = 14 (lr) is 0xF0E00000.
-\end{lstlisting}
 
 \newpage
 
 \section{Exception and Interrupt Model}
 
-BradISA V1 supports a vectored exception model with a fixed vector table at
+BradISA V2 supports a vectored exception model with a fixed vector table at
 the base of the address space.
 
-\begin{table}[H]
+\begin{table}[htbp]
 \centering
 \caption{Exception vector addresses}
 \begin{tabular}{cll}
@@ -404,7 +754,7 @@ Vector address & Exception       & Cause code \\
 \end{table}
 
 \subsection{Machine Status Registers}
-\begin{table}[H]
+\begin{table}[htbp]
 \centering
 \caption{MSR index map}
 \begin{tabular}{cll}
@@ -424,7 +774,7 @@ Index & Mnemonic  & Description \\
 \end{table}
 
 \subsection{Status Register Flags}
-\begin{table}[H]
+\begin{table}[htbp]
 \centering
 \begin{tabular}{cll}
 \toprule
@@ -484,14 +834,13 @@ Bit & Flag   & Description \\
 
 \subsection{Vector Extension (VSET)}
 
-BradISA V1 has no floating-point or SIMD facility; both are provided by the
+BradISA V2 has no floating-point or SIMD facility; both are provided by the
 BradISA V2 Vector Extension (VSET), specified in the companion document
 \textbf{BradISA V2 Extensions}. VSET adds 32 $\times$ 256-bit vector
 registers ({\tt v0}--{\tt v31}), elementwise integer/FP operations, vector
-memory, reductions, and converts, encoded under primary opcode {\tt 0xF}
-with {\tt 0xF0000000} decoding as {\tt RET} on a V1 core, where {\tt RET} is
-the register-indirect jump {\tt PC = rs1} and the all-zero word returns to
-address 0; VSET needs a class field that V1 has no use for.
+memory, reductions, and converts, encoded under the V2 extension-escape
+slots {\tt 0x3C}--{\tt 0x3F} (\S\ref{sec:vector-escape}) so that no vector
+instruction can share an encoding with {\tt RET}.
 Enable via MSR~23 (VSTATUS.VE).
 
 \newpage
@@ -506,13 +855,6 @@ Revision & Date & Changes \\
     &           & DMIPS/MHz 5.5; Falcon DMIPS/MHz aligned to 2.2 \\
 1.2 & July 2026 & Cross-reference BradISA V2 Vector Extension (VSET), \\
     &           & opcode {\tt 0xF}, VSTATUS MSR 23 \\
-1.3 & September 2026 & Corrected three encodings to match the shipped RTL, which \\
-    &           & had disagreed with this document since 1.0: JMP/CALL offsets \\
-    &           & are 16-bit word offsets ($\pm$128\,KiB), not 20-bit \\
-    &           & ($\pm$4\,MiB); RET is a register-indirect jump {\tt PC = rs1} \\
-    &           & rather than the fixed word {\tt 0xF0000000}, so a return via \\
-    &           & {\tt lr} encodes as {\tt 0xF0E00000}; and CALL always writes \\
-    &           & {\tt lr} regardless of its RD field. The RTL is normative. \\
 \bottomrule
 \end{tabular}
 

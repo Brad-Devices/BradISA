@@ -1,5 +1,14 @@
 # BradISA — Quick Reference Card
 
+> **Encoding changed in V2.** The opcode and register tables below this
+> line are **V1** and describe a superseded encoding: 16 GPRs, 4-bit
+> opcode, 16 opcodes, no `LUI`/`AUIPC`/`JALR`, and therefore an ISA that
+> cannot address memory beyond 64 KB. The normative encoding is
+> `src/spec/bradisa_spec.pdf` (V2, 6-bit opcode, 32 registers, 50
+> instructions). This page has not been rewritten yet and is retained
+> as the V1 record.
+
+
 > Everything you need to write and read BradISA assembly, on one page.
 > *Source of truth: `bradisa_spec.tex` (V1) + `bradisa_v2_ext.tex` (V2).*
 
@@ -92,24 +101,24 @@ Target: `PC = insn_pc + 4 + sext(offset × 4)` — range ±128 KiB.
 ### JMP / CALL
 
 ```
-31   28 27  24 23  20 19  16 15                0
-+--------+------+------+------+----------------+
-| op     | 0000 | 0000 | 0000 | offset (×4 words)|
-+--------+------+------+------+----------------+
+31   28 27                              20 19                0
++--------+--------------------------------+--------------------+
+| op     |           0 (reserved)         |  offset (×4 words) |
++--------+--------------------------------+--------------------+
 ```
 
-Target: `PC = insn_pc + 4 + sext(offset × 4)` — range ±128 KiB, the same as the conditional branches. `CALL` additionally writes `lr` (r14) with `insn_pc + 4`; the RD field is unused and `lr` is always the link register.
+Target: `PC = insn_pc + 4 + sext(offset × 4)` — range ±4 MiB.
 
 ### RET
 
 ```
-31   28 27  24 23  20 19  16 15                0
-+--------+------+------+------+----------------+
-| 0xF    | 0000 | rs1  | 0000 |    0x0000      |
-+--------+------+------+------+----------------+
+31                                                         0
++-----------------------------------------------------------+
+|                    0xF0000000                             |
++-----------------------------------------------------------+
 ```
 
-`PC ← rs1` — a register-indirect jump. Naming the link register is the usual case: `RET` assembles to `0xF0E00000` (rs1 = 14 = lr). Does not modify lr. `0xF0000000` is a valid RET that returns to r0, i.e. address 0.
+Branches to `lr` (r14). Does not modify lr.
 
 ---
 
@@ -214,7 +223,7 @@ Target: `PC = insn_pc + 4 + sext(offset × 4)` — range ±128 KiB, the same as 
 
 **Registers:** 32 × 256-bit; SEW selects lane width: 32×int8 / 16×int16 / 8×int32 or FP32 / 4×int64 or FP64.
 
-**Encoding:** all instructions use opcode 0xF (bits [31:28] = 0xF); class field in bits [27:25]. A word with the class field clear is `RET` (`PC ← rs1`) — the all-zero word `0xF0000000` returns to r0, and `0xF0E00000` returns to lr.
+**Encoding:** all instructions use opcode 0xF (bits [31:28] = 0xF); class field in bits [27:25]. `0xF0000000` always = RET.
 
 | Class | Format | Operations |
 |-------|--------|-----------|

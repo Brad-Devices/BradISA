@@ -41,8 +41,11 @@ count implied by the element width (8×FP32, 4×FP64, 16×int16, 32×int8).
 
 ## 4. Exceptions & Syscalls
 
-- User code traps via `ECALL`; the kernel handles at the S-mode vector.
-- `MRET` returns from a trap; the vectored table is fixed-address.
+- User code traps via a software-injected trap; the dispatch machinery (trap
+  vector table, cause dispatch, syscall router) is built, and the hardware
+  ECALL entry is an additive change when the ISA delivers it.
+- There is no `MRET` in V1; trap return is software-driven until the ISA
+  adds it.
 - Misaligned access, illegal instruction, and privilege violations trap to
   the S-mode table (BradOS) or M-mode (BradSec firmware).
 
@@ -92,14 +95,14 @@ count implied by the element width (8×FP32, 4×FP64, 16×int16, 32×int8).
 
 | Need | Go to |
 |------|-------|
-| Base ISA encoding | `spec/bradisa_spec.tex` |
-| V2 (compressed/VSET/power/MSRs) | `spec/bradisa_v2_ext.tex` |
-| Instruction formats | `docs/03-instruction-formats.md` |
-| VSET vector extension | `docs/08-vector.md` |
-| Architectural model | `ARCHITECTURE_REFERENCE_MODEL.md` |
-| GPU / accelerator ISA | the BradVector repository (separate ISA) |
+| Base ISA encoding | `src/spec/bradisa_spec.tex` |
+| V2 (compressed/VSET/power/MSRs) | `src/spec/bradisa_v2_ext.tex` |
+| GPU SIMT ISA | `Brad Silicon/GPU/GPU_ISA.md` |
+| SoC (cores+NPU+fab) | `Brad Silicon/CPU/BRADCHIP.md` |
+| Architectural model | `BradISA/ARCHITECTURE_REFERENCE_MODEL.md` |
 
 ---
 
-*Keep the honesty guardrails: plan for Gen2 intent, but only rely on what
-is tagged V1 or V2. The ISA carries the performance weight.*
+*Keep the honesty guardrails: plan for Gen2/Gen2 intent, but only ship what
+is tagged [Gen1]. See `ROADMAP.md` §Architecture Over the Node War for why
+the ISA carries the performance weight.*

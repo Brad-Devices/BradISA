@@ -31,10 +31,15 @@
 
 ## 2. Architectural State (Unprivileged)
 
+> **Revised to BradISA V2.** The Gen 1 state was 16 GPRs with r1–r4 as arguments
+> and r13/r14/r15 as sp/lr/pc. V2 widened the register file to 32 and moved the
+> ABI, per `Brad Silicon/ARCHITECTURES.md` §5.2. The privilege levels and the
+> exception table are unchanged.
+
 | State | Count/Width | Notes |
 |-------|-------------|-------|
-| **GPRs r0–r15** | 16 × 32-bit (Gen1); 64-bit extendable | r0 hardwired zero; r1–r4 args (r1 = return); r13 sp, r14 lr, r15 pc (read-only); ABI table in the ARM appx. |
-| **PC** | 32-bit | 4-byte aligned; BR/JMP/CALL ±128 KiB (16-bit word offset); RET is `PC ← rs1`, normally `PC ← lr` |
+| **GPRs r0–r31** | 32 × 32-bit (V2) | r0 hardwired zero; r1–r8 args (r1 = return); r9–r14 temporaries; r15 link; r16–r26 callee-saved; r27 sp, r28 gp, r29 tp; r30–r31 reserved; ABI table in the ARM appx. |
+| **PC** | 32-bit | 4-byte aligned; BR ±128 KiB (16-bit word offset); JMP/CALL ±4 MiB (20-bit word offset); RET through lr |
 | **Vector regs v0–v31** | 32 × 256-bit (VSET) | v0 = mask (Gen2 predication); ABI v1–v4 args, v8–v15 callee-saved |
 | **Status MSRs** | VSTATUS.VE, POWER, etc. | Vector-enable, power/thermal |
 | **Float** | none (scalar) | All FP in vector regs, lane 0 |
@@ -55,7 +60,7 @@ Vectored exception table (matching `bradisa_spec.tex`):
 | 0x08 | page fault | 2 |
 | 0x0C | unaligned access | 3 |
 | 0x10 | privilege violation | 4 |
-| 0x14 | system call (ECALL) | 5 |
+| 0x14 | system call (software trap) | 5 |
 | 0x18 | timer interrupt | 6 |
 | 0x20–0x2C | external IRQ 0–3 | 7 |
 
@@ -63,7 +68,7 @@ Vectored exception table (matching `bradisa_spec.tex`):
 
 | Extension | Status | Defines |
 |-----------|--------|---------|
-| **Base V1** | [Gen1] | P/E-core scalar, control, load/store, ECALL/MRET |
+| **Base V1** | [Gen1] | P/E-core scalar, control, load/store (no ECALL/MRET in V1; the trap vector is software-driven) |
 | **Compressed (16-bit)** | [V2 spec; Gen2 hardware intent] | Dense encoding, mixed 16/32-bit words (STATUS.C) |
 | **VSET (Vector)** | [Gen1] | 256-bit fixed-length SIMD; all FP lives here |
 | **SVEXT (Scaleable Vector)** | [Gen2, intent] | SVE-style variable-length (128–512-bit), VL-agnostic code |
@@ -83,9 +88,11 @@ Vectored exception table (matching `bradisa_spec.tex`):
 |-----|------|
 | `bradisa_spec.tex` | Base ISA V1 normative spec (encoding, exceptions, pipeline models) |
 | `bradisa_v2_ext.tex` | V2 extensions: compressed, kestrel, VSET, power, branch predictor |
-| `ARCHITECTURE_GUIDE.md` | Developer-oriented guide |
-| BradVector repository | The separate GPU / accelerator SIMT ISA |
+| `GPU/GPU_ISA.md` | BradVector (Torox G1) SIMT ISA |
+| `Compute/BRADAPEX_ACCELERATOR_SPEC.md` | BA-ISA |
+| `BradISA/ARCHITECTURE_GUIDE.md` | Developer-oriented guide |
+| `Brad Silicon/CPU/BRADCHIP.md` | SoC integration (cores + NPU + memory controller) |
 
 ---
 
-*Normative sources: `spec/bradisa_spec.tex`, `spec/bradisa_v2_ext.tex`. This ARM is a companion model, not a replacement spec.*
+*Normative sources: `src/spec/bradisa_spec.tex`, `src/spec/bradisa_v2_ext.tex`. This ARM is a companion model, not a replacement spec.*
