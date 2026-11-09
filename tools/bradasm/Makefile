@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# bradasm -- the BradISA assembler.
+# bradasm -- the BradISA V2 assembler.
 #
 # Nothing but a C99 compiler. No configure, no dependencies, no code
 # generation: if you can build the FPGA you can build the assembler.
@@ -14,8 +14,8 @@ INCDIR   = include
 TESTDIR  = tests
 BUILDDIR = build
 
-LIB_SRC  = $(SRCDIR)/brad_as.c
-LIB_OBJ  = $(BUILDDIR)/brad_as.o
+LIB_SRC  = $(SRCDIR)/bradasm.c
+LIB_OBJ  = $(BUILDDIR)/bradasm.o
 CLI_OBJ  = $(BUILDDIR)/main.o
 TEST_OBJ = $(BUILDDIR)/test_brad_as.o
 
@@ -32,13 +32,13 @@ all: $(ASM) $(TEST)
 $(BUILDDIR):
 	@mkdir -p $(BUILDDIR)
 
-$(LIB_OBJ): $(SRCDIR)/brad_as.c $(INCDIR)/brad_as.h | $(BUILDDIR)
+$(LIB_OBJ): $(LIB_SRC) $(INCDIR)/brad/bradasm.h $(INCDIR)/brad/bradisa.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) -I$(INCDIR) -c $< -o $@
 
-$(CLI_OBJ): $(SRCDIR)/main.c $(INCDIR)/brad_as.h | $(BUILDDIR)
+$(CLI_OBJ): $(SRCDIR)/main.c $(INCDIR)/brad/bradasm.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) -I$(INCDIR) -c $< -o $@
 
-$(TEST_OBJ): $(TESTDIR)/test_brad_as.c $(INCDIR)/brad_as.h | $(BUILDDIR)
+$(TEST_OBJ): $(TESTDIR)/test_brad_as.c $(INCDIR)/brad/bradasm.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) -I$(INCDIR) -c $< -o $@
 
 $(LIB): $(LIB_OBJ)
@@ -50,9 +50,10 @@ $(ASM): $(CLI_OBJ) $(LIB)
 $(TEST): $(TEST_OBJ) $(LIB)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(TEST_OBJ) $(LIB)
 
-# The self-test parses bradisa_defines.v and fails if the assembler's opcode
-# table has drifted away from the RTL. Pass the path if it is not where the
-# default expects.
+# The self-test assembles every V2 mnemonic and asserts exact encodings
+# against brad/bradisa.h, then parses bradisa_defines.v and fails if the RTL's
+# opcode table has drifted away from the assembler's header. Pass the path if
+# it is not where the default expects.
 test: $(TEST)
 	./$(TEST) $(DEFINES)
 

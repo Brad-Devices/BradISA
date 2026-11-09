@@ -1,512 +1,440 @@
-/* SPDX-License-Identifier: MIT */
-/* brad_as self-test.
+/*
+ * test_brad_as -- BradISA V2 assembler.
  *
  * Two kinds of check:
  *
- *  1. Encodings.  Every word asserted here was verified against the shipped
- *     RTL by simulation, not against this assembler's own opinion of itself.
- *     The values came out of the CI testbenches.
+ *   1. Exact words.  Each format gets at least one literal 32-bit value
+ *      computed by hand from bradisa_spec.tex §3, so a field move or a
+ *      wrong shift fails here rather than in a program six months later.
  *
- *  2. Drift.  The opcodes and register numbers are parsed straight out of
- *     rtl/verilog/bradisa_defines.v and compared against what brad_as.c
- *     believes.  A hand-maintained copy of an encoding table is a bug
- *     waiting for a Tuesday; this makes it a test failure instead.
+ *   2. Coverage.  Every mnemonic in the V2 instruction set is assembled at
+ *      least once and its opcode field is checked against the BRAD_V2_OP_*
+ *      constant it is supposed to encode.
+ *
+ * The assembler is the toolchain's side of the ISA contract. If it drifts
+ * from the RTL, tools/check_isa_drift.py catches that; this file catches
+ * the choices inside the assembler itself.
  */
 
-#include "brad_as.h"
+#include "brad/bradasm.h"
 
+#include <assert.h>
+#include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
+#include <stdlib.h>
+#include <ctype.h>
 
-static int checks;
-static int failures;
+static struct brad_as_output out;
 
-static void fail(const char *what, const char *detail)
+static uint32_t opcode_of(uint32_t word)
 {
-    printf("FAIL %s: %s\n", what, detail);
-    failures++;
+    return (word >> BRAD_V2_OPCODE_SHIFT) & BRAD_V2_OPCODE_MASK;
 }
 
-static void expect_word(const char *what, const char *src, size_t index,
-                        uint32_t want)
+static uint32_t rd_of(uint32_t word)
 {
-    struct brad_as_output *out;
-    char detail[512];
-
-    checks++;
-    out = (struct brad_as_output *)malloc(sizeof *out);
-    if (out == NULL) {
-        printf("FAIL %s: out of memory\n", what);
-        failures++;
-        return;
-    }
-    if (brad_as_assemble(src, out) != 0) {
-        snprintf(detail, sizeof detail, "assembly failed at line %u: %s",
-                 out->err.line, out->err.error);
-        fail(what, detail);
-        free(out);
-        return;
-    }
-    if (index >= out->code_words) {
-        snprintf(detail, sizeof detail,
-                 "asked for word %lu but only %lu were emitted",
-                 (unsigned long)index, (unsigned long)out->code_words);
-        fail(what, detail);
-        free(out);
-        return;
-    }
-    if (out->code[index] != want) {
-        snprintf(detail, sizeof detail, "word %lu is 0x%08x, wanted 0x%08x",
-                 (unsigned long)index, out->code[index], want);
-        fail(what, detail);
-    }
-    free(out);
+    return (word >> BRAD_V2_RD_SHIFT) & BRAD_V2_REG_MASK;
 }
 
-static void expect_error(const char *what, const char *src)
+static uint32_t rs1_of(uint32_t word)
 {
-    struct brad_as_output *out;
-    char detail[512];
-
-    checks++;
-    out = (struct brad_as_output *)malloc(sizeof *out);
-    if (out == NULL) {
-        printf("FAIL %s: out of memory\n", what);
-        failures++;
-        return;
-    }
-    if (brad_as_assemble(src, out) == 0) {
-        fail(what, "assembled cleanly but should have been rejected");
-        free(out);
-        return;
-    }
-    if (out->err.error[0] == '\0') {
-        fail(what, "rejected but with no error message");
-    }
-    snprintf(detail, sizeof detail, "rejected at line %u: %s", out->err.line,
-             out->err.error);
-    printf("     ok  %-34s %s\n", what, detail);
-    free(out);
+    return (word >> BRAD_V2_RS1_SHIFT) & BRAD_V2_REG_MASK;
 }
 
-static void expect_ok(const char *what, const char *src)
+static uint32_t rs2_of(uint32_t word)
 {
-    struct brad_as_output *out;
-    char detail[512];
-
-    checks++;
-    out = (struct brad_as_output *)malloc(sizeof *out);
-    if (out == NULL) {
-        printf("FAIL %s: out of memory\n", what);
-        failures++;
-        return;
-    }
-    if (brad_as_assemble(src, out) != 0) {
-        snprintf(detail, sizeof detail, "failed at line %u: %s", out->err.line,
-                 out->err.error);
-        fail(what, detail);
-        free(out);
-        return;
-    }
-    free(out);
+    return (word >> BRAD_V2_RS2_SHIFT) & BRAD_V2_REG_MASK;
 }
 
-static void expect_entry(const char *what, const char *src, uint32_t want)
+static uint32_t assemble_one(const char *src)
 {
-    struct brad_as_output *out;
-    char detail[512];
-
-    checks++;
-    out = (struct brad_as_output *)malloc(sizeof *out);
-    if (out == NULL) {
-        printf("FAIL %s: out of memory\n", what);
-        failures++;
-        return;
+    memset(&out, 0, sizeof out);
+    if (brad_as_assemble(src, &out) != 0) {
+        fprintf(stderr, "failed to assemble: %s\n  %s\n", src, out.error.msg);
+        assert(0);
     }
-    if (brad_as_assemble(src, out) != 0) {
-        snprintf(detail, sizeof detail, "failed at line %u: %s", out->err.line,
-                 out->err.error);
-        fail(what, detail);
-        free(out);
-        return;
-    }
-    if (out->entry_point != want) {
-        snprintf(detail, sizeof detail, "entry is 0x%08x, wanted 0x%08x",
-                 out->entry_point, want);
-        fail(what, detail);
-    }
-    free(out);
+    assert(out.ok);
+    assert(out.count == 1);
+    return out.code[0];
 }
 
-static void expect_sym(const char *what, const char *src, const char *name,
-                       uint32_t want)
+static void expect_ok(const char *src)
 {
-    struct brad_as_output *out;
-    uint32_t got = 0;
-    char detail[512];
+    memset(&out, 0, sizeof out);
+    assert(brad_as_assemble(src, &out) == 0);
+    assert(out.ok);
+}
 
-    checks++;
-    out = (struct brad_as_output *)malloc(sizeof *out);
-    if (out == NULL) {
-        printf("FAIL %s: out of memory\n", what);
-        failures++;
-        return;
+static void expect_error(const char *src, const char *needle)
+{
+    memset(&out, 0, sizeof out);
+    if (brad_as_assemble(src, &out) == 0 || out.ok) {
+        fprintf(stderr, "expected an error from: %s\n", src);
+        assert(0);
     }
-    if (brad_as_assemble(src, out) != 0) {
-        snprintf(detail, sizeof detail, "failed at line %u: %s", out->err.line,
-                 out->err.error);
-        fail(what, detail);
-        free(out);
-        return;
+    if (needle && strstr(out.error.msg, needle) == NULL) {
+        fprintf(stderr, "error for %s was '%s', expected to contain '%s'\n",
+                src, out.error.msg, needle);
+        assert(0);
     }
-    if (!brad_as_lookup(out, name, &got)) {
-        snprintf(detail, sizeof detail, "symbol '%s' not found", name);
-        fail(what, detail);
-    } else if (got != want) {
-        snprintf(detail, sizeof detail, "'%s' is 0x%08x, wanted 0x%08x", name,
-                 got, want);
-        fail(what, detail);
-    }
-    free(out);
 }
 
-/* ─── Encodings, cross-checked against simulated RTL ──────────────────────
- *
- * These are the words the Verilog and VHDL testbenches were verified to
- * execute.  ADD/SUB/MUL/AND/OR/XOR/SHL/SHR especially: those are the eight
- * that were computing against r0 until tb_brad_isa caught it. */
+/* ─── Exact encodings, one per format ────────────────────────────────── */
 
-static void test_encodings(void)
+static void test_exact_words(void)
 {
-    printf("-- encodings (verified against simulated RTL)\n");
-
-    expect_word("ADDI r2,r0,7",      "ADDI r2, r0, 7",      0, 0x82000007u);
-    expect_word("ADDI r1,r0,7",      "ADDI r1, r0, 7",      0, 0x81000007u);
-    expect_word("ADDI r3,r0,5",      "ADDI r3, r0, 5",      0, 0x83000005u);
-    expect_word("ADD r1,r2,r3",      "ADD r1, r2, r3",      0, 0x01230000u);
-    expect_word("STW [r2+8],r3",     "STW r3, [r2 + 8]",    0, 0xA0230008u);
-    expect_word("LDW r4,[r2+8]",     "LDW r4, [r2 + 8]",    0, 0x94200008u);
-    expect_word("STW alt spelling",  "STW r3, r2, 8",       0, 0xA0230008u);
-    expect_word("LDW alt spelling",  "LDW r4, r2, 8",       0, 0x94200008u);
-    expect_word("RET is PC<-lr",     "RET",                 0, 0xF0E00000u);
-    expect_word("RET r0",            "RET r0",              0, 0xF0000000u);
-    expect_word("RET r3",            "RET r3",              0, 0xF0300000u);
-    expect_word("NOP",               "NOP",                 0, 0x80000000u);
-    expect_word("case insensitive",  "aDdI r2, r0, 7",      0, 0x82000007u);
-    expect_word("sp/lr aliases",     "ADDI sp, sp, 1\nADDI lr, lr, 2",
-                0, 0x8DD00001u);
-    expect_word("lr alias word 1",   "ADDI sp, sp, 1\nADDI lr, lr, 2",
-                1, 0x8EE00002u);
-    expect_word("negative immediate","ADDI r1, r0, -8",     0, 0x8100FFF8u);
-    expect_word("immediate mask",    "ADDI r1, r0, 0x7F",   0, 0x8100007Fu);
-    expect_word("MV r4,r5",            "MV r4, r5",            0, 0x84500000u);
-
-    /* The four RRR opcodes, assembled rather than hand-encoded. */
-    expect_word("SUB r1,r2,r3",      "SUB r1, r2, r3",      0, 0x11230000u);
-    expect_word("MUL r1,r2,r3",      "MUL r1, r2, r3",      0, 0x21230000u);
-    expect_word("AND r1,r2,r3",      "AND r1, r2, r3",      0, 0x31230000u);
-    expect_word("OR r1,r2,r3",       "OR r1, r2, r3",       0, 0x41230000u);
-    expect_word("XOR r1,r2,r3",      "XOR r1, r2, r3",      0, 0x51230000u);
-    expect_word("SHL r1,r2,r3",      "SHL r1, r2, r3",      0, 0x61230000u);
-    expect_word("SHR r1,r2,r3",      "SHR r1, r2, r3",      0, 0x71230000u);
-
-    /* Branch / jump offsets are word counts relative to the *next*
-     * instruction.  JMP self at 0x00 is the canonical -1 word. */
-    expect_word("JMP self",          "JMP $",               0, 0xD000FFFFu);
-    expect_word("JMP +2 words",      "here: JMP there\n"
-                                      "     .word 0\n"
-                                      "     .word 0\n"
-                                      "there: NOP",         0, 0xD0000002u);
-    expect_word("BZ r1,+1",          "BZ r1, there\n"
-                                      "there: NOP",         0, 0xB0100000u);
-    expect_word("BNZ r1,+1",         "BNZ r1, there\n"
-                                      "there: NOP",         0, 0xC0100000u);
-    expect_word("CALL named lr",     "CALL lr, there\n"
-                                      "there: NOP",         0, 0xE0000000u);
-    expect_word("CALL bare",         "CALL there\n"
-                                      "there: NOP",         0, 0xE0000000u);
-
-    /* Backward reference, i.e. a real loop. */
-    expect_word("loop back",         "loop: ADDI r1, r1, -1\n"
-                                      "      BNZ r1, loop",  1, 0xC010FFFEu);
+    assert(assemble_one("NOP") == 0x00000000u);
+    assert(assemble_one("ADD r3, r1, r2") == 0x04611000u);
+    assert(assemble_one("ADDI r1, r0, -1") == 0x4020FFFFu);
+    assert(assemble_one("ANDI r2, r3, 0xFFFF") == 0x4443FFFFu);
+    assert(assemble_one("LDW r3, [r1 + 4]") == 0x80610004u);
+    assert(assemble_one("STW r2, [r1 + 4]") == 0x8C410004u);
+    assert(assemble_one("LUI r1, 0x12345") == 0xA0212345u);
+    assert(assemble_one("AUIPC r2, 1") == 0xA4400001u);
+    assert(assemble_one("BEQ r1, r2, 8") == 0xC0220001u);
+    assert(assemble_one("BZ r5, 8") == 0xD8A00001u);
+    assert(assemble_one("JMP 8") == 0xA8000001u);
+    assert(assemble_one("JAL r15, 8") == 0xADE00001u);
+    assert(assemble_one("CALL 8") == 0xB1E00001u);
+    assert(assemble_one("JALR r15, r1, 0") == 0xB5E10000u);
+    assert(assemble_one("RET") == 0xB8000000u);
+    assert(assemble_one("FENCE") == 0xBC000000u);
+    assert(assemble_one("LR.W r3, [r1]") == 0xE0610000u);
+    assert(assemble_one("SC.W r3, r2, [r1]") == 0xE4611000u);
+    assert(assemble_one("AMOSWAP.W r3, r2, [r1]") == 0xE8611000u);
+    assert(assemble_one("AMOADD.W r3, r2, [r1]") == 0xEC611000u);
 }
 
-/* ─── The board boot ROM, byte for byte ──────────────────────────────────
- *
- * rtl/fpga/tangnano9k/top_tangnano9k.v shipped these five words as hex
- * literals, hand-assembled.  If bradasm reproduces them exactly then the
- * board can be driven from source with zero behavioural change. */
+/* ─── Every mnemonic, and its opcode field ───────────────────────────── */
 
-static void test_boot_rom(void)
+struct mnemonic_case {
+    const char *src;
+    enum brad_isa_v2_opcode op;
+};
+
+static const struct mnemonic_case mnemonics[] = {
+    {"NOP",                 BRAD_V2_OP_NOP},
+    {"ADD  r1, r2, r3",     BRAD_V2_OP_ADD},
+    {"SUB  r1, r2, r3",     BRAD_V2_OP_SUB},
+    {"MUL  r1, r2, r3",     BRAD_V2_OP_MUL},
+    {"MULHU r1, r2, r3",    BRAD_V2_OP_MULHU},
+    {"DIV  r1, r2, r3",     BRAD_V2_OP_DIV},
+    {"DIVU r1, r2, r3",     BRAD_V2_OP_DIVU},
+    {"REM  r1, r2, r3",     BRAD_V2_OP_REM},
+    {"REMU r1, r2, r3",     BRAD_V2_OP_REMU},
+    {"AND  r1, r2, r3",     BRAD_V2_OP_AND},
+    {"OR   r1, r2, r3",     BRAD_V2_OP_OR},
+    {"XOR  r1, r2, r3",     BRAD_V2_OP_XOR},
+    {"SHL  r1, r2, r3",     BRAD_V2_OP_SHL},
+    {"SHR  r1, r2, r3",     BRAD_V2_OP_SHR},
+    {"SAR  r1, r2, r3",     BRAD_V2_OP_SAR},
+
+    {"ADDI r1, r2, 1",      BRAD_V2_OP_ADDI},
+    {"ANDI r1, r2, 1",      BRAD_V2_OP_ANDI},
+    {"ORI  r1, r2, 1",      BRAD_V2_OP_ORI},
+    {"XORI r1, r2, 1",      BRAD_V2_OP_XORI},
+    {"SLLI r1, r2, 1",      BRAD_V2_OP_SLLI},
+    {"SRLI r1, r2, 1",      BRAD_V2_OP_SRLI},
+    {"SRAI r1, r2, 1",      BRAD_V2_OP_SRAI},
+    {"SLTI r1, r2, 1",      BRAD_V2_OP_SLTI},
+    {"SLTIU r1, r2, 1",     BRAD_V2_OP_SLTIU},
+
+    {"LDW  r1, [r2 + 0]",   BRAD_V2_OP_LDW},
+    {"LHU  r1, [r2 + 0]",   BRAD_V2_OP_LHU},
+    {"LHBU r1, [r2 + 0]",   BRAD_V2_OP_LHBU},
+    {"STW  r1, [r2 + 0]",   BRAD_V2_OP_STW},
+    {"SH   r1, [r2 + 0]",   BRAD_V2_OP_SH},
+    {"SB   r1, [r2 + 0]",   BRAD_V2_OP_SB},
+
+    {"LUI   r1, 1",         BRAD_V2_OP_LUI},
+    {"AUIPC r1, 1",         BRAD_V2_OP_AUIPC},
+
+    {"JMP  8",              BRAD_V2_OP_JMP},
+    {"JAL  r1, 8",          BRAD_V2_OP_JAL},
+    {"CALL 8",              BRAD_V2_OP_CALL},
+    {"JALR r1, r2, 0",      BRAD_V2_OP_JALR},
+    {"RET",                 BRAD_V2_OP_RET},
+    {"FENCE",               BRAD_V2_OP_FENCE},
+
+    {"BEQ  r1, r2, 8",      BRAD_V2_OP_BEQ},
+    {"BNE  r1, r2, 8",      BRAD_V2_OP_BNE},
+    {"BLT  r1, r2, 8",      BRAD_V2_OP_BLT},
+    {"BGE  r1, r2, 8",      BRAD_V2_OP_BGE},
+    {"BLTU r1, r2, 8",      BRAD_V2_OP_BLTU},
+    {"BGEU r1, r2, 8",      BRAD_V2_OP_BGEU},
+    {"BZ   r1, 8",          BRAD_V2_OP_BZ},
+    {"BNZ  r1, 8",          BRAD_V2_OP_BNZ},
+
+    {"LR.W      r1, [r2]",      BRAD_V2_OP_LR_W},
+    {"SC.W      r1, r3, [r2]",  BRAD_V2_OP_SC_W},
+    {"AMOSWAP.W r1, r3, [r2]",  BRAD_V2_OP_AMOSWAP_W},
+    {"AMOADD.W  r1, r3, [r2]",  BRAD_V2_OP_AMOADD_W},
+};
+
+static void test_every_mnemonic(void)
 {
-    static const char *const boot =
-        "        .org 0x00\n"
-        "        ADDI r1, r0, 0        ; init counter\n"
-        "loop:   ADDI r1, r1, 1        ; r1++\n"
-        "        ADDI r2, r0, 0x04     ; r2 = data address 0x04\n"
-        "        STW  r1, [r2 + 0]     ; publish counter\n"
-        "        JMP  loop             ; back around\n"
-        "        .fill 11, 0x81000000  ; NOP-equivalent padding\n"
-        "        .entry 0x00\n";
+    unsigned n = sizeof mnemonics / sizeof mnemonics[0];
+    assert(n == 50);
 
-    printf("-- Tang Nano 9K boot ROM reproduces the hand-assembled words\n");
-
-    expect_word("boot w0", boot, 0, 0x81000000u);
-    expect_word("boot w1", boot, 1, 0x81100001u);
-    expect_word("boot w2", boot, 2, 0x82000004u);
-    expect_word("boot w3", boot, 3, 0xA0210000u);
-    expect_word("boot w4", boot, 4, 0xD000FFFCu);
-    expect_word("boot w5", boot, 5, 0x81000000u);
-    expect_word("boot w15", boot, 15, 0x81000000u);
-    expect_sym("boot loop label", boot, "loop", 0x04u);
-    expect_entry("boot entry", boot, 0x00u);
-}
-
-/* ─── Symbols, expressions, directives ─────────────────────────────────── */
-
-static void test_language(void)
-{
-    printf("-- symbols, expressions and directives\n");
-
-    expect_sym("forward label",  "  JMP fwd\n  NOP\nfwd: NOP\n", "fwd", 0x08u);
-    expect_sym("backward label",  "top: NOP\n  JMP top\n",       "top", 0x00u);
-    expect_sym("equ constant",    ".equ K, 4\n ADDI r1, r0, K\n", "K", 4u);
-    expect_sym("label on org",    ".org 0x40\nhere: NOP\n",      "here", 0x40u);
-    expect_sym("two labels/line", "a: b: NOP\n",                "a", 0x00u);
-    expect_sym("two labels/line", "a: b: NOP\n",                "b", 0x00u);
-
-    expect_word("hex binary lit", "ADDI r1, r0, 0b1010", 0, 0x8100000Au);
-    expect_word("underscores",    "ADDI r1, r0, 0x7F_FF", 0, 0x81007FFFu);
-    expect_word("char literal",   "ADDI r1, r0, 'A'",    0, 0x81000041u);
-    expect_word("dollar is PC",   "  ADDI r1, r0, $\n",  0, 0x81000000u);
-    expect_word("dot is PC too",  "  ADDI r1, r0, . + 4\n", 0, 0x81000004u);
-    expect_word("operator prec",  "ADDI r1, r0, 1 + 2 * 3", 0, 0x81000007u);
-    expect_word("parens",         "ADDI r1, r0, (1 + 2) * 3", 0, 0x81000009u);
-    expect_word("bitwise",        "ADDI r1, r0, 0xF0 | 0x0F", 0, 0x810000FFu);
-    expect_word("shifts",         "ADDI r1, r0, 1 << 8",  0, 0x81000100u);
-    expect_word("unary minus",    "ADDI r1, r0, -(-5)", 0, 0x81000005u);
-    expect_word("not",            "ADDI r1, r0, ~0 & 0xF", 0, 0x8100000Fu);
-    expect_word("comments",       "; a comment\n ADDI r1, r0, 1 ; trailing\n",
-                0, 0x81000001u);
-    expect_word("blank lines",    "\n\n\n   ADDI r1, r0, 1\n\n",
-                0, 0x81000001u);
-
-    /* A computed offset, which is the feature that makes a table position
-     * independent. */
-    expect_word("self-relative size",
-                "start: NOP\n NOP\n NOP\n .word end - start\n"
-                "end: NOP\n", 3, 0x0000000Cu);
-
-    /* .byte / .half pack little-endian into the word image. */
-    expect_word("byte order", ".byte 0x11, 0x22, 0x33, 0x44\n", 0,
-                0x44332211u);
-    expect_word("half order", ".half 0x1122\n .half 0x3344\n", 0,
-                0x33441122u);
-    expect_word("mixed data",  ".byte 1\n .half 2\n .byte 3\n", 0,
-                0x03000201u);
-}
-
-/* ─── Errors that must be caught ───────────────────────────────────────── */
-
-static void test_errors(void)
-{
-    printf("-- diagnostics\n");
-
-    expect_error("unknown mnemonic",      "FLY r1, r2\n");
-    expect_error("unknown directive",     ".frobnicate 3\n");
-    expect_error("not a register",        "ADDI r16, r0, 1\n");
-    expect_error("not a register (text)", "ADDI banana, r0, 1\n");
-    expect_error("missing comma",         "ADDI r1 r0 1\n");
-    expect_error("too few operands",      "ADD r1, r2\n");
-    expect_error("too many operands",     "ADD r1, r2, r3, r4\n");
-    expect_error("immediate too large",   "ADDI r1, r0, 40000\n");
-    expect_error("immediate too small",   "ADDI r1, r0, -40000\n");
-    expect_error("undefined label",       "JMP nowhere\n");
-    expect_error("unaligned .org",        ".org 2\n  NOP\n");
-    expect_error("out of reach",          "JMP 0x40000\n");
-    expect_error("label defined twice",   "x: NOP\nx: NOP\n");
-    expect_error("NOP with operands",     "NOP r1\n");
-    expect_error("CALL non-lr link",      "CALL r3, $ + 4\n");
-    expect_error("compressed rejected",   "C.ADDI r1, 1\n");
-    expect_error("compressed rejected 2", "C.NOP\n");
-    /* The line number must point at the offending line, not line 1. */
-    {
-        struct brad_as_output *out = (struct brad_as_output *)malloc(1 << 20);
-        checks++;
-        if (out == NULL) {
-            printf("FAIL error line number: out of memory\n");
-            failures++;
-        } else {
-            static const char *src =
-                "NOP\nNOP\nNOP\nBOGUS r1\n";
-            if (brad_as_assemble(src, out) == 0) {
-                fail("error line number", "bad source assembled cleanly");
-            } else if (out->err.line != 4) {
-                char d[256];
-                snprintf(d, sizeof d, "error reported on line %u, wanted 4",
-                         out->err.line);
-                fail("error line number", d);
-            }
-            free(out);
+    for (unsigned i = 0; i < n; i++) {
+        uint32_t word = assemble_one(mnemonics[i].src);
+        if (opcode_of(word) != (uint32_t)mnemonics[i].op) {
+            fprintf(stderr, "mnemonic %s encoded opcode 0x%X, want 0x%X\n",
+                    mnemonics[i].src, opcode_of(word),
+                    (unsigned)mnemonics[i].op);
+            assert(0);
         }
     }
 }
 
-/* ─── Drift guard against rtl/verilog/bradisa_defines.v ────────────────── */
+/* ─── Fields, ABI names, labels ──────────────────────────────────────── */
 
-/* Parse a Verilog constant: 4'h0, 4'hA, 5'd31, 24'd1_048_575, or a plain
- * 1234.  The RTL writes all six of those shapes, so this has to read all
- * six -- a drift guard that quietly skips half the file is not a guard. */
-static int verilog_value(const char *s, unsigned long *out)
+static void test_fields_and_abi(void)
 {
-    const char *q;
-    unsigned long v = 0;
-    int base = 10;
-    int saw_base = 0;
+    /* ABI names resolve to the published register map. */
+    uint32_t w = assemble_one("ADD a0, t0, sp");
+    assert(rd_of(w) == BRAD_V2_A0);       /* r1  */
+    assert(rs1_of(w) == BRAD_V2_T0);      /* r9  */
+    assert(rs2_of(w) == BRAD_V2_SP);      /* r27 */
 
-    while (*s == ' ' || *s == '\t')
-        s++;
+    w = assemble_one("ADD lr, ra, zero");
+    assert(rd_of(w) == 15);
+    assert(rs1_of(w) == 15);
+    assert(rs2_of(w) == 0);
 
-    for (q = s; *q; q++) {
-        if (*q != '\'')
-            continue;
-        if (q[1] == 'h' || q[1] == 'H') { base = 16; saw_base = 1; }
-        else if (q[1] == 'b' || q[1] == 'B') { base = 2;  saw_base = 1; }
-        else if (q[1] == 'd' || q[1] == 'D') { base = 10; saw_base = 1; }
-        if (saw_base)
-            break;
+    /* The non-bracket address form is the same encoding. */
+    assert(assemble_one("LDW r3, r1, 4") == assemble_one("LDW r3, [r1 + 4]"));
+    assert(assemble_one("STW r2, r1, 4") == assemble_one("STW r2, [r1 + 4]"));
+
+    /* Branch offsets are relative to pc + 4, then divided by four. */
+    w = assemble_one("BEQ r1, r2, 12");
+    assert((w & 0xFFFFu) == 2);
+
+    /* A label resolves to the same address a literal would name. */
+    expect_ok(".org 0\nstart: BZ r1, done\nADD r2, r0, r0\ndone: RET\n");
+    assert(out.count == 3);
+    assert(out.code[0] == 0xD8200001u);   /* BZ r1, +4 -> word offset 1 */
+    assert(out.code[1] == 0x04400000u);   /* ADD r2, r0, r0 */
+    assert(out.code[2] == BRAD_V2_RET_ENCODING);
+
+    /* .entry records the symbol address, not the line number. */
+    expect_ok(".org 0x100\n_start: RET\n.entry _start\n");
+    assert(out.entry_point == 0x100);
+    assert(out.nsymbols == 1);
+    assert(strcmp(out.symbols[0].name, "_start") == 0);
+
+    /* Comments and case-insensitivity. */
+    assert(assemble_one("add r1, r2, r3   # lower case, hash comment") ==
+           assemble_one("ADD r1, r2, r3 ; semicolon comment"));
+}
+
+/* ─── Data directives ────────────────────────────────────────────────── */
+
+static void test_data(void)
+{
+    expect_ok(".word 0xDEADBEEF\n");
+    assert(out.count == 1);
+    assert(out.code[0] == 0xDEADBEEFu);
+
+    expect_ok(".byte 0x12\n");
+    assert(out.count == 1);
+    assert(out.code[0] == 0x00000012u);
+
+    expect_ok(".byte 1\n.byte 2\n.byte 3\n.byte 4\n");
+    assert(out.count == 1);
+    assert(out.code[0] == 0x04030201u);
+
+    expect_ok(".half 0x1234\n.half 0x5678\n");
+    assert(out.count == 1);
+    assert(out.code[0] == 0x56781234u);
+
+    expect_ok(".org 8\nRET\n");
+    assert(out.count == 3);
+    assert(out.code[2] == BRAD_V2_RET_ENCODING);
+    assert(out.code[0] == 0 && out.code[1] == 0);
+}
+
+/* ─── RTL drift: defines against the assembler's header ─────────────── *
+ *
+ * bradisa_defines.v names its opcodes BRAD_OP_*; the C assembler speaks
+ * BRAD_V2_OP_*.  Two spellings of one opcode table is exactly where the V1
+ * tree drifted, so this check walks the header, finds the same name in the
+ * defines, and fails on the first disagreement.  The path is argv[1] so the
+ * Makefile can point at whichever copy of the tree it runs in; the header is
+ * the copy sitting next to this test.
+ */
+
+
+static char *slurp(const char *path, long *lenp)
+{
+    FILE *f = fopen(path, "rb");
+    char *buf;
+    long n;
+
+    if (f == NULL)
+        return NULL;
+    fseek(f, 0, SEEK_END);
+    n = ftell(f);
+    rewind(f);
+    buf = (char *)malloc((size_t)n + 1u);
+    if (buf == NULL || n < 0) { fclose(f); free(buf); return NULL; }
+    if (fread(buf, 1, (size_t)n, f) != (size_t)n) { fclose(f); free(buf); return NULL; }
+    buf[n] = '\0';
+    fclose(f);
+    *lenp = n;
+    return buf;
+}
+
+/* Parse an RHS like 6'h2E, 5'd15, 0x2E or 42. Returns 1 on success. */
+static int parse_value(const char *rhs, unsigned long *val)
+{
+    while (*rhs == ' ' || *rhs == '\t' || *rhs == '=' || *rhs == '\'')
+        rhs++;
+    if (rhs[0] == '\0')
+        return 0;
+    if (isdigit((unsigned char)rhs[0]) &&
+        strchr(rhs, '\'') != NULL && rhs[1] == '\'') {
+        /* width'base digits: after the apostrophe comes h/d/b then the value */
+        const char *p = strchr(rhs, '\'') + 1;
+        int base = 10;
+        if (*p == 'h' || *p == 'H') base = 16;
+        else if (*p == 'd' || *p == 'D') base = 10;
+        else if (*p == 'b' || *p == 'B') base = 2;
+        p++;
+        while (*p == ' ' || *p == '_') p++;
+        *val = strtoul(p, NULL, base);
+        return 1;
     }
-
-    if (saw_base)
-        s = q + 2;
-    for (; *s; s++) {
-        int d;
-        if (*s == '_' || *s == ';' || *s == ' ' || *s == '\t' || *s == '\r' ||
-            *s == '\n' || *s == ',')
-            continue;
-        d = (unsigned char)*s;
-        if (d >= '0' && d <= '9')
-            d -= '0';
-        else if (d >= 'A' && d <= 'F')
-            d = d - 'A' + 10;
-        else if (d >= 'a' && d <= 'f')
-            d = d - 'a' + 10;
-        else
-            return 0;
-        if (d >= base)
-            return 0;
-        v = v * (unsigned long)base + (unsigned long)d;
-    }
-    *out = v;
+    *val = strtoul(rhs, NULL, 0);
     return 1;
 }
 
-static int read_define(const char *path, const char *name, unsigned long *val)
+/* Every BRAD_V2_OP_* constant in the header must exist in the defines (as
+ * BRAD_OP_<same name>) and carry the same value. Returns the count checked;
+ * a missing or mismatched opcode aborts the process through assert. */
+static unsigned test_defines_drift(const char *defines_path)
 {
-    FILE *f = fopen(path, "r");
-    char line[256];
-    int found = 0;
+    const char *header_path = "include/brad/bradisa.h";
+    char *defs, *hdr;
+    const char *p;
+    unsigned checked = 0;
+    long defs_len = 0, hdr_len = 0;
 
-    if (f == NULL)
-        return 0;
-    while (fgets(line, sizeof line, f) != NULL) {
-        char key[64];
-        const char *eq;
-        if (sscanf(line, "localparam %63s", key) != 1)
-            continue;
-        if (strcmp(key, name) != 0)
-            continue;
-        eq = strchr(line, '=');
-        if (eq != NULL && verilog_value(eq + 1, val))
-            found = 1;
-        break;
+    defs = slurp(defines_path, &defs_len);
+    hdr = slurp(header_path, &hdr_len);
+    if (defs == NULL) {
+        fprintf(stderr, "brad_as: cannot open defines %s\n", defines_path);
+        exit(1);
     }
-    fclose(f);
-    return found;
+    if (hdr == NULL) {
+        fprintf(stderr, "brad_as: cannot open header %s\n", header_path);
+        exit(1);
+    }
+
+    for (p = hdr; *p != '\0'; p++) {
+        if (strncmp(p, "BRAD_V2_OP_", 11) != 0)
+            continue;
+        const char *n = p + 11;
+        char name[48];
+        size_t len = 0;
+        while ((isalnum((unsigned char)n[len]) || n[len] == '_'))
+            len++;
+        if (len == 0 || len >= sizeof name)
+            continue;
+        if (n[len] != ' ' && n[len] != '=')
+            continue;
+        memcpy(name, p, 11 - 5 + len);   /* BRAD_OP_ + the tail of the name */
+        memcpy(name, "BRAD_OP_", 8);
+        memcpy(name + 8, n, len);
+        name[8 + len] = '\0';
+
+        /* header value */
+        const char *eq = strchr(p + len, '=');
+        unsigned long hv = 0;
+        if (eq == NULL || !parse_value(eq, &hv))
+            continue;
+        p = eq;
+
+        /* defines value -- token-boundary match, so BRAD_OP_SH does not
+         * match BRAD_OP_SHL */
+        const char *d = defs;
+        unsigned long dv = 0;
+        size_t nlen = strlen(name);
+        int found = 0;
+        while ((d = strstr(d, name)) != NULL) {
+            char after = d[nlen];
+            char before = (d == defs) ? '\0' : d[-1];
+            if (!isalnum((unsigned char)after) && after != '_' &&
+                !isalnum((unsigned char)before) && before != '_') {
+                const char *deq = strchr(d, '=');
+                if (deq != NULL && parse_value(deq, &dv)) {
+                    found = 1;
+                    break;
+                }
+            }
+            d += 1;
+        }
+        if (!found) {
+            fprintf(stderr, "brad_as: %s is in the header but missing from %s\n",
+                    name, defines_path);
+            exit(1);
+        }
+        if (hv != dv) {
+            fprintf(stderr, "brad_as: %s = 0x%lx in %s but 0x%lx in the header\n",
+                    name, dv, defines_path, hv);
+            exit(1);
+        }
+        checked++;
+    }
+
+    free(defs);
+    free(hdr);
+    return checked;
 }
 
-static void expect_define(const char *path, const char *name, uint32_t want)
+
+/* ─── Errors that must not become silent encodings ───────────────────── */
+
+static void test_errors(void)
 {
-    unsigned long got = 0;
+    expect_error("FOO r1, r2, r3", "unknown instruction");
+    expect_error("ADD r32, r0, r0", "syntax error");
+    expect_error("ADD r1, r1", "syntax error");
 
-    checks++;
-    if (!read_define(path, name, &got)) {
-        char d[256];
-        snprintf(d, sizeof d, "%s not found in %s", name, path);
-        printf("SKIP %s\n", d);
-        checks--;
-        return;
-    }
-    if ((uint32_t)got != want) {
-        char d[256];
-        snprintf(d, sizeof d, "%s is 0x%lx in the RTL, 0x%08x in brad_as.c",
-                 name, got, want);
-        fail("ISA constant drift", d);
-    }
-}
+    expect_error(".compress", "retired");
+    expect_error(".nocompress", "retired");
+    expect_error("C.ADD r1, r2, r3", "V1-only");
 
-static void test_defines_drift(const char *defines_path)
-{
-    printf("-- opcode table matches %s\n", defines_path);
+    expect_error("BZ r1, 3", "not 4-byte aligned");
+    expect_error("JMP 2", "not 4-byte aligned");
+    expect_error("ADDI r1, r0, 70000", "out of range");
+    expect_error("SLLI r1, r0, 32", "out of range");
+    expect_error("LDW r1, [r2 + 0x10000]", "out of range");
+    expect_error("LR.W r1, [r2 + 4]", "no offset");
+    expect_error("JALR r1, r2, 70000", "out of range");
 
-    expect_define(defines_path, "BRAD_OP_ADD",  0x0u);
-    expect_define(defines_path, "BRAD_OP_SUB",  0x1u);
-    expect_define(defines_path, "BRAD_OP_MUL",  0x2u);
-    expect_define(defines_path, "BRAD_OP_AND",  0x3u);
-    expect_define(defines_path, "BRAD_OP_OR",   0x4u);
-    expect_define(defines_path, "BRAD_OP_XOR",  0x5u);
-    expect_define(defines_path, "BRAD_OP_SHL",  0x6u);
-    expect_define(defines_path, "BRAD_OP_SHR",  0x7u);
-    expect_define(defines_path, "BRAD_OP_ADDI", 0x8u);
-    expect_define(defines_path, "BRAD_OP_LDW",  0x9u);
-    expect_define(defines_path, "BRAD_OP_STW",  0xAu);
-    expect_define(defines_path, "BRAD_OP_BZ",   0xBu);
-    expect_define(defines_path, "BRAD_OP_BNZ",  0xCu);
-    expect_define(defines_path, "BRAD_OP_JMP",  0xDu);
-    expect_define(defines_path, "BRAD_OP_CALL", 0xEu);
-    expect_define(defines_path, "BRAD_OP_RET",  0xFu);
-    expect_define(defines_path, "BRAD_LR",      14u);
-    expect_define(defines_path, "BRAD_SP",      13u);
-    expect_define(defines_path, "BRAD_R0",      0u);
+    expect_error("a: NOP\na: NOP\n", "duplicate label");
+    expect_error("BZ r1, nowhere\n", "undefined symbol");
+    expect_error(".word nowhere\n", "bad data expression");
 }
 
 int main(int argc, char **argv)
 {
-    const char *defines = (argc > 1) ? argv[1]
-                                     : "../../rtl/verilog/bradisa_defines.v";
-
-    printf("bradasm self-test\n");
-
-    test_encodings();
-    test_boot_rom();
-    test_language();
+    test_exact_words();
+    test_every_mnemonic();
+    test_fields_and_abi();
+    test_data();
     test_errors();
-    test_defines_drift(defines);
 
-    /* A file that must assemble cleanly, to make sure the "no errors" path is
-     * actually exercised somewhere. */
-    expect_ok("full program",
-        ".equ  BASE, 0x40\n"
-        ".org 0x00\n"
-        "start: ADDI r1, r0, 0\n"
-        "       ADDI r2, r0, BASE\n"
-        "loop:  ADDI r1, r1, 1\n"
-        "       STW  r1, [r2 + 0]\n"
-        "       BZ  r1, done\n"
-        "       JMP loop\n"
-        "done:  BZ  r1, sub\n"
-        "       RET\n"
-        "sub:   ADDI r3, r0, 1\n"
-        "       RET\n"
-        ".entry start\n");
-
-    printf("\nchecks run : %d\n", checks);
-    printf("failures   : %d\n", failures);
-    if (failures == 0) {
-        printf("PASS\n");
-        return 0;
+    unsigned drift = 0;
+    if (argc > 1) {
+        drift = test_defines_drift(argv[1]);
+        printf("brad_as: PASS -- %u mnemonics + %u RTL opcode constants agree\n",
+               (unsigned)(sizeof mnemonics / sizeof mnemonics[0]), drift);
+    } else {
+        printf("brad_as: PASS -- %u mnemonics, labels, data, errors\n",
+               (unsigned)(sizeof mnemonics / sizeof mnemonics[0]));
     }
-    printf("FAIL\n");
-    return 1;
+    return 0;
 }
