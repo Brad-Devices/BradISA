@@ -1,5 +1,5 @@
 ; SPDX-License-Identifier: MIT
-; BradISA V1 -- the full-ISA program both testbenches execute.
+; BradISA V2 -- the full-ISA program both testbenches execute.
 ;
 ; rtl/verilog/tb_brad_isa.v and rtl/vhdl/tb_brad_isa.vhd load the words this
 ; file assembles to (tb_brad_isa_prog.mem) and check what the core did with
@@ -24,7 +24,7 @@
 ;   0x40        BNZ taken         -> 7
 ;   0x44        JMP               -> 7
 ;   0x48        CALL return r1    -> 1          0x4C: sub r2 -> 7
-;   0x50        lr after RET      -> 4
+;   0x50        ra after RET      -> 0x12C (V2 ABI: ra is r15)
 ;   0x54        loop sum r2       -> 55         0x58: loop counter r3 -> 0
 ;
 ; The branch/jump offsets are computed by the assembler from the labels.
@@ -137,7 +137,7 @@ jmp_after:
         ADDI r1, r0, 1           ; return point
         STW  r1, [r0 + 0x48]     ; 1
         STW  r2, [r0 + 0x4C]     ; 7, written by the subroutine
-        STW  r14, [r0 + 0x50]    ; lr = 4
+        STW  lr,  [r0 + 0x50]    ; ra = return address (V2: lr is r15)
         JMP  sum_init
 sub_call:
         ADDI r2, r0, 7

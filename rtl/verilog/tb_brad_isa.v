@@ -74,8 +74,10 @@ module tb_brad_isa;
                S_CAL1 = 18, S_CAL2 = 19, S_CALL = 20,
                S_LSUM = 21, S_LCNT = 22;
 
-    // CALL sits at 0x128 in tb_brad_isa.s; lr must hold pc+4 = 0x12C, the
-    // return point (the ADDI right after the CALL).
+    // CALL sits at 0x128 in tb_brad_isa.s; ra (r15, the V2 link register)
+    // must hold pc+4 = 0x12C, the return point (the ADDI right after the
+    // CALL). V1 named it lr = r14; V2 renamed the ABI and r14 became a
+    // caller-saved temporary.
     localparam [31:0] CALL_PC = 32'h00000128;
 
     // Fill imem with a NOP (ADDI r0, r0, 0) so a runaway fetch spins in
@@ -178,7 +180,7 @@ module tb_brad_isa;
         expect_r("loop-acc",   2, 32'd55);
         expect_r("loop-cnt",   3, 32'd0);
         expect_r("round-trip", 4, 32'd42);
-        expect_r("lr",        14, CALL_PC + 4);
+        expect_r("lr (ra)",   15, CALL_PC + 4);
 
         // ── Summary ─────────────────────────────────────────────────
         $display("ISA checks run   : %0d", checks);

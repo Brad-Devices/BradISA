@@ -436,6 +436,8 @@ module tb_brad_core;
             $display("  RESULT: PASS -- every instruction produced its defined value");
         else
             $display("  RESULT: FAIL -- %0d mismatches", errors);
+        if (errors == 0)
+            $display("PASS");
         $finish;
     end
 
