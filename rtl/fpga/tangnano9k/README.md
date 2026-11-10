@@ -40,12 +40,15 @@ Real BradISA machine code in an on-chip ROM — the same encodings the CI
 testbench runs, so the board is executing the proved CPU, not a stub:
 
 ```
-0x00  ADDI r1, r0, 0     0x81000000   init counter
-0x04  ADDI r1, r1, 1     0x81100001   loop: r1++
-0x08  ADDI r2, r0, 0x04  0x82000004   r2 = data address
-0x0C  STW  [r2], r1      0xA0210000   publish the counter
-0x10  JMP  0x04          0xD000FFFC   back to the loop
+0x00  ADDI r1, r0, 0     0x40200000   init counter
+0x04  ADDI r1, r1, 1     0x40210001   loop: r1++
+0x08  ADDI r2, r0, 0x04  0x40400004   r2 = data address
+0x0C  STW  r1, [r2 + 0]  0x8C220000   publish the counter
+0x10  JMP  0x04          0xA81FFFFC   back to the loop
 ```
+
+(words are the V2 assembler's output; `boot_rom.vh` is generated from this
+file and CI re-generates it byte-for-byte on every run)
 
 The core publishes the counter by storing it to data memory; the top-level
 latches `dmem_wdata` on a write and shows the low six bits on the LEDs. So the
@@ -86,20 +89,18 @@ plain LUT4s, so the cell count *is* the fabric count:
 
 | Design | LUT4 | FF | % of device LUTs |
 |--------|------|----|------------------|
-| Full board top | **~1,700–1,900** | 240 | **~22%** |
-| The 32×32 `MUL` on its own | 1,330 | 0 | 78% of the design's LUTs |
-| Same design, `MUL` removed (probe only) | 507 | 240 | 6% |
+| Full board top, V2 design (2026-11-10, `-nowidelut`) | **1,250** | 374 | **14%** |
 
-**The design fits the GW1NR-9C with roughly 80% of its LUTs unused.** The
-multiply is the single biggest cost at 1,330 LUT4 — 78% of the logic — so it is
-the obvious optimisation target, but it is not a blocker. For scale: the whole
-rest of the core, register file, boot ROM, RAM, divider and LED logic together is
-507 LUT4 and 240 flops.
+**The design fits the GW1NR-9C with ~86% of its LUTs unused.**
 
-The top-level figure is a range, not a constant: abc9's mapping is not perfectly
-reproducible, and CI measured 1,707 where a local run gave 1,776 and another
-1,854. It is a budget check, not a golden number, and `make gowin_fit` is what
-enforces it.
+The V1-era probe table is kept for history: the 32×32 `MUL` on its own measured
+1,330 LUT4 under the old core (78% of that design's logic), and the same V1
+design with the multiply removed measured 507 LUT4 — the multiply was the
+biggest single cost, and it was an optimisation target, not a blocker.
+
+The top-level figure is a budget check, not a golden number: abc9's mapping is
+not perfectly reproducible run to run, and `make gowin_fit` is what enforces
+the budget on every run.
 
 The one thing yosys's Gowin flow cannot do is infer a DSP. `*` becomes LUT logic
 because `synth_gowin` has no multiplier mapping, even though the part carries 20
@@ -108,8 +109,9 @@ because `synth_gowin` has no multiplier mapping, even though the part carries 20
 Two honest caveats:
 
 - These are for **this boot program**. The counter touches two registers, so
-  yosys prunes the other fourteen — hence 240 FFs, not 512. A program using all
-  16 registers costs more, and a real one will also want more memory.
+  yosys prunes the others — hence 374 FFs, not the full register file. A
+  program using every register costs more, and a real one will also want more
+  memory.
 - Gate-level simulation below is proof the netlist *computes*, not proof it
   routes. Utilisation says there is room; only place-and-route and a board say
   it works.
@@ -122,8 +124,8 @@ Two honest caveats:
 
 This is the step that catches a synthesis bug rather than an RTL bug. It runs
 against a build whose divider constant is shrunk via `chparam` — same logic,
-different timing constant — and currently reports **96 LED steps, 0 sequence
-errors, final count 32**, identically to the RTL testbench.
+different timing constant — and currently reports **112 LED steps, 0 sequence
+errors, final count 48**, identically to the RTL testbench.
 
 So the design is no longer only "it elaborates". It is "the gates yosys produced
 count correctly."
@@ -152,11 +154,12 @@ roughly 5×. It is a real guard, not a decoration: run it with
 2. **A board.** Until a bitstream is on real silicon and a person watches the
    LEDs count, the honest tag is DESIGNED + SYNTHESIZED + GATE-LEVEL VERIFIED.
    The `RUNS_ON_REAL_GATES` badge stays unflipped.
-3. **A DSP-aware multiply.** An optimisation, not a blocker. At 1,330 LUT4 the
-   multiply is 78% of the logic, and `synth_gowin` cannot infer a DSP. A
-   hand-built 18×18 decomposition, or a `$mul` a prjtrellis-himbaechel flow
-   claims as a hard block, would hand most of that back and free the LUTs for
-   real program memory and a full register file.
+3. **A DSP-aware multiply.** An optimisation, not a blocker. The V1-era probe
+   measured the 32×32 `MUL` alone at 1,330 LUT4 (78% of that design's logic),
+   and `synth_gowin` still cannot infer a DSP — the part carries 20 18×18
+   blocks. A hand-built 18×18 decomposition, or a `$mul` a
+   prjtrellis-himbaechel flow claims as a hard block, would hand most of that
+   back and free the LUTs for real program memory and a full register file.
 4. **Real program memory.** The core reads instruction memory
    combinationally, so this build uses a small distributed ROM (16 words). Real
    program memory wants a synchronous BSRAM port, which means a matching core

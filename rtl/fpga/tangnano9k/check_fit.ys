@@ -17,6 +17,8 @@ read_verilog -sv -I../../verilog \
     ../../verilog/bradisa_defines.v \
     ../../verilog/brad_regfile.v \
     ../../verilog/brad_alu.v \
+    ../../verilog/brad_decode.v \
+    ../../verilog/brad_execute.v \
     ../../verilog/brad_core.v \
     ./top_tangnano9k.v
 

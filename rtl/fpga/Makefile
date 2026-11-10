@@ -91,9 +91,10 @@ quartus:
 # Synthesises the board top onto Gowin primitives and reports real
 # cell counts.  This is a synthesis receipt, not a bitstream: GW1N
 # place-and-route needs nextpnr-himbaechel, Apicula, or Gowin EDA,
-# and "runs on real gates" needs the board in hand.  Measured: the
-# design uses 1,854 of the part's 8,640 LUT4 and 240 of 6,480 FFs.
-# See tangnano9k/README.md for the full resource breakdown.
+# and "runs on real gates" needs the board in hand.  Measured on the
+# V2 design (2026-11-10): 1,250 of the part's 8,640 LUT4 and 374 of
+# 6,480 FFs under -nowidelut; `make gowin_fit` re-measures on every
+# run.  See tangnano9k/README.md for the full resource breakdown.
 gowin: $(BOOT_VH)
 	cd $(FPGA_DIR)/$(GOWIN_DIR) && $(YOSYS) -s synth_gowin.ys
 
@@ -134,6 +135,8 @@ sim_board:
 	  $(VERILOG_DIR)/bradisa_defines.v \
 	  $(VERILOG_DIR)/brad_regfile.v \
 	  $(VERILOG_DIR)/brad_alu.v \
+	  $(VERILOG_DIR)/brad_decode.v \
+	  $(VERILOG_DIR)/brad_execute.v \
 	  $(VERILOG_DIR)/brad_core.v
 	$(VVP) /tmp/brad_top_sim.out
 

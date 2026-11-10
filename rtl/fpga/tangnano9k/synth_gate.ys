@@ -18,6 +18,8 @@ read_verilog -sv -I../../verilog -I. \
     ../../verilog/bradisa_defines.v \
     ../../verilog/brad_regfile.v \
     ../../verilog/brad_alu.v \
+    ../../verilog/brad_decode.v \
+    ../../verilog/brad_execute.v \
     ../../verilog/brad_core.v \
     ./top_tangnano9k.v
 
@@ -26,5 +28,16 @@ hierarchy -check -top top_tangnano9k
 chparam -set DIV_HALF 3 -set POR_LIMIT 7 top_tangnano9k
 
 synth_gowin -top top_tangnano9k -vout tangnano9k_gate.v
+
+# Icarus 12 crashes in its own elaborator (ivl_nexus_ptrs, `net' assertion)
+# on the ALU carry-chain netlist. Expand the ALU cells into the LUT3 full
+# adders they are (functionally exact; see alu_to_lut3.v for the truth
+# tables) and re-emit. The synthesis cell counts are unaffected -- this is a
+# rewrite of how the netlist is expressed, not what it computes.
+design -reset
+read_verilog -sv tangnano9k_gate.v
+techmap -map ./alu_to_lut3.v
+rename -enumerate
+write_verilog tangnano9k_gate.v
 
 stat
