@@ -80,12 +80,12 @@ module tb_brad_isa;
     // caller-saved temporary.
     localparam [31:0] CALL_PC = 32'h00000128;
 
-    // Fill imem with a NOP (ADDI r0, r0, 0) so a runaway fetch spins in
+    // Fill imem with a NOP (V2: opcode 0) so a runaway fetch spins in
     // place instead of executing whatever garbage follows the program.
     task clear_mem;
         begin
             for (i = 0; i < 256; i = i + 1) begin
-                imem[i] = 32'h81000000;
+                imem[i] = 32'h00000000;
                 dmem[i] = 32'd0;
             end
         end

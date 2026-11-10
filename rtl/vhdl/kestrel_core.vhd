@@ -1,5 +1,5 @@
 -- SPDX-License-Identifier: MIT
--- BradISA V1 -- Kestrel 8-stage dual-issue in-order core (VHDL)
+-- BradISA V2 -- Kestrel 8-stage dual-issue in-order core (VHDL, compile-only)
 -- Pipeline: F1->F2->D1->D2->EX1->EX2->M->WB
 -- Dual-issue: ALU+ALU or ALU+LDW/STW pairing
 -- 16-entry BTB with BTFNT static predictor
@@ -37,10 +37,10 @@ architecture rtl of kestrel_core is
     -- ─── D1: decode stage (slot 0) ───────────────────────────
     signal d1_valid   : std_logic;
     signal d1_pc      : std_logic_vector(31 downto 0);
-    signal d1_opcode  : std_logic_vector(3 downto 0);
-    signal d1_rd      : std_logic_vector(3 downto 0);
-    signal d1_rs1     : std_logic_vector(3 downto 0);
-    signal d1_rs2     : std_logic_vector(3 downto 0);
+    signal d1_opcode  : std_logic_vector(5 downto 0);
+    signal d1_rd      : std_logic_vector(4 downto 0);
+    signal d1_rs1     : std_logic_vector(4 downto 0);
+    signal d1_rs2     : std_logic_vector(4 downto 0);
     signal d1_rs1_val : std_logic_vector(31 downto 0);
     signal d1_rs2_val : std_logic_vector(31 downto 0);
     signal d1_imm     : std_logic_vector(31 downto 0);
@@ -49,8 +49,8 @@ architecture rtl of kestrel_core is
     -- ─── D2: decode stage (slot 1 + pairing) ─────────────────
     signal d2_s0_valid   : std_logic;
     signal d2_s0_pc      : std_logic_vector(31 downto 0);
-    signal d2_s0_opcode  : std_logic_vector(3 downto 0);
-    signal d2_s0_rd      : std_logic_vector(3 downto 0);
+    signal d2_s0_opcode  : std_logic_vector(5 downto 0);
+    signal d2_s0_rd      : std_logic_vector(4 downto 0);
     signal d2_s0_rs1_val : std_logic_vector(31 downto 0);
     signal d2_s0_rs2_val : std_logic_vector(31 downto 0);
     signal d2_s0_imm     : std_logic_vector(31 downto 0);
@@ -58,10 +58,10 @@ architecture rtl of kestrel_core is
 
     signal d2_s1_valid   : std_logic;
     signal d2_s1_pc      : std_logic_vector(31 downto 0);
-    signal d2_s1_opcode  : std_logic_vector(3 downto 0);
-    signal d2_s1_rd      : std_logic_vector(3 downto 0);
-    signal d2_s1_rs1     : std_logic_vector(3 downto 0);
-    signal d2_s1_rs2     : std_logic_vector(3 downto 0);
+    signal d2_s1_opcode  : std_logic_vector(5 downto 0);
+    signal d2_s1_rd      : std_logic_vector(4 downto 0);
+    signal d2_s1_rs1     : std_logic_vector(4 downto 0);
+    signal d2_s1_rs2     : std_logic_vector(4 downto 0);
     signal d2_s1_rs1_val : std_logic_vector(31 downto 0);
     signal d2_s1_rs2_val : std_logic_vector(31 downto 0);
     signal d2_s1_imm     : std_logic_vector(31 downto 0);
@@ -71,7 +71,7 @@ architecture rtl of kestrel_core is
 
     -- ─── EX1: execute slot 0 ─────────────────────────────────
     signal ex1_valid      : std_logic;
-    signal ex1_rd         : std_logic_vector(3 downto 0);
+    signal ex1_rd         : std_logic_vector(4 downto 0);
     signal ex1_result     : std_logic_vector(31 downto 0);
     signal ex1_addr       : std_logic_vector(31 downto 0);
     signal ex1_reg_we     : std_logic;
@@ -80,11 +80,11 @@ architecture rtl of kestrel_core is
     signal ex1_store_data : std_logic_vector(31 downto 0);
 
     -- ─── EX2: execute slot 1 + memory ────────────────────────
-    signal ex2_s0_rd        : std_logic_vector(3 downto 0);
+    signal ex2_s0_rd        : std_logic_vector(4 downto 0);
     signal ex2_s0_result    : std_logic_vector(31 downto 0);
     signal ex2_s0_reg_we    : std_logic;
     signal ex2_s1_valid     : std_logic;
-    signal ex2_s1_rd        : std_logic_vector(3 downto 0);
+    signal ex2_s1_rd        : std_logic_vector(4 downto 0);
     signal ex2_s1_result    : std_logic_vector(31 downto 0);
     signal ex2_s1_reg_we    : std_logic;
     signal ex2_s1_addr      : std_logic_vector(31 downto 0);
@@ -93,18 +93,18 @@ architecture rtl of kestrel_core is
     signal ex2_s1_store_data : std_logic_vector(31 downto 0);
 
     -- ─── M: memory stage ─────────────────────────────────────
-    signal m_s0_rd     : std_logic_vector(3 downto 0);
+    signal m_s0_rd     : std_logic_vector(4 downto 0);
     signal m_s0_result : std_logic_vector(31 downto 0);
     signal m_s0_reg_we : std_logic;
-    signal m_s1_rd     : std_logic_vector(3 downto 0);
+    signal m_s1_rd     : std_logic_vector(4 downto 0);
     signal m_s1_result : std_logic_vector(31 downto 0);
     signal m_s1_reg_we : std_logic;
 
     -- ─── WB: writeback stage ─────────────────────────────────
-    signal wb_s0_rd     : std_logic_vector(3 downto 0);
+    signal wb_s0_rd     : std_logic_vector(4 downto 0);
     signal wb_s0_result : std_logic_vector(31 downto 0);
     signal wb_s0_reg_we : std_logic;
-    signal wb_s1_rd     : std_logic_vector(3 downto 0);
+    signal wb_s1_rd     : std_logic_vector(4 downto 0);
     signal wb_s1_result : std_logic_vector(31 downto 0);
     signal wb_s1_reg_we : std_logic;
 
@@ -114,10 +114,10 @@ architecture rtl of kestrel_core is
     signal rf1_rdata1 : std_logic_vector(31 downto 0);
     signal rf1_rdata2 : std_logic_vector(31 downto 0);
     signal wb0_we     : std_logic;
-    signal wb0_waddr  : std_logic_vector(3 downto 0);
+    signal wb0_waddr  : std_logic_vector(4 downto 0);
     signal wb0_wdata  : std_logic_vector(31 downto 0);
     signal wb1_we     : std_logic;
-    signal wb1_waddr  : std_logic_vector(3 downto 0);
+    signal wb1_waddr  : std_logic_vector(4 downto 0);
     signal wb1_wdata  : std_logic_vector(31 downto 0);
 
     -- ─── Control signals ─────────────────────────────────────
@@ -166,14 +166,14 @@ architecture rtl of kestrel_core is
     -- ─── Hazard helpers ──────────────────────────────────────
     signal load_to_use    : std_logic;
     signal forward_ex1_en : std_logic;
-    signal forward_ex1_rd : std_logic_vector(3 downto 0);
+    signal forward_ex1_rd : std_logic_vector(4 downto 0);
     signal forward_ex1_val : std_logic_vector(31 downto 0);
 
     -- ─── Slot 1 raw decode (from F2) ────────────────────────
-    signal raw_s1_op  : std_logic_vector(3 downto 0);
-    signal raw_s1_rd  : std_logic_vector(3 downto 0);
-    signal raw_s1_rs1 : std_logic_vector(3 downto 0);
-    signal raw_s1_rs2 : std_logic_vector(3 downto 0);
+    signal raw_s1_op  : std_logic_vector(5 downto 0);
+    signal raw_s1_rd  : std_logic_vector(4 downto 0);
+    signal raw_s1_rs1 : std_logic_vector(4 downto 0);
+    signal raw_s1_rs2 : std_logic_vector(4 downto 0);
     signal raw_s1_imm : std_logic_vector(15 downto 0);
 
     -- ─── Combinational ALU0/ADDI helpers ────────────────────
@@ -187,10 +187,10 @@ architecture rtl of kestrel_core is
 begin
 
     -- ─── Slot 1 raw decode (combinational from F2) ──────────
-    raw_s1_op  <= f2_insn(31 downto 28);
-    raw_s1_rd  <= f2_insn(27 downto 24);
-    raw_s1_rs1 <= f2_insn(23 downto 20);
-    raw_s1_rs2 <= f2_insn(19 downto 16);
+    raw_s1_op  <= f2_insn(31 downto 26);
+    raw_s1_rd  <= f2_insn(25 downto 21);
+    raw_s1_rs1 <= f2_insn(20 downto 16);
+    raw_s1_rs2 <= f2_insn(15 downto 11);
     raw_s1_imm <= f2_insn(15 downto 0);
 
     -- ─── Dual regfile instances ─────────────────────────────
@@ -269,7 +269,7 @@ begin
 
     -- BTFNT: backward conditional branch (signed imm < 0) => predict taken
     f2_br_neg  <= '1' when (signed(f2_insn(15 downto 0)) < 0) else '0';
-    f2_is_bzbnz<= '1' when (f2_insn(31 downto 28) = OP_BZ or f2_insn(31 downto 28) = OP_BNZ) else '0';
+    f2_is_bzbnz<= '1' when (f2_insn(31 downto 26) = OP_BZ or f2_insn(31 downto 26) = OP_BNZ) else '0';
     pred_taken <= btb_hit and f2_br_neg and f2_is_bzbnz;
 
     -- ─── F1 stage ────────────────────────────────────────────
@@ -348,27 +348,27 @@ begin
             elsif stall_d1 = '0' then
                 d1_valid   <= f2_valid;
                 d1_pc      <= f2_pc;
-                d1_opcode  <= f2_insn(31 downto 28);
-                d1_rd      <= f2_insn(27 downto 24);
-                d1_rs1     <= f2_insn(23 downto 20);
-                d1_rs2     <= f2_insn(19 downto 16);
+                d1_opcode  <= f2_insn(31 downto 26);
+                d1_rd      <= f2_insn(25 downto 21);
+                d1_rs1     <= f2_insn(20 downto 16);
+                d1_rs2     <= f2_insn(15 downto 11);
 
                 v_rs1_val := rf0_rdata1;
                 v_rs2_val := rf0_rdata2;
                 if forward_ex1_en = '1' and
-                   f2_insn(23 downto 20) = forward_ex1_rd then
+                   f2_insn(20 downto 16) = forward_ex1_rd then
                     v_rs1_val := forward_ex1_val;
                 end if;
                 if forward_ex1_en = '1' and
-                   f2_insn(19 downto 16) = forward_ex1_rd then
+                   f2_insn(15 downto 11) = forward_ex1_rd then
                     v_rs2_val := forward_ex1_val;
                 end if;
                 d1_rs1_val <= v_rs1_val;
                 d1_rs2_val <= v_rs2_val;
 
                 d1_imm    <= sext16(f2_insn(15 downto 0));
-                d1_reg_we <= '1' when (unsigned(f2_insn(31 downto 28)) <= 8) or
-                                      (f2_insn(31 downto 28) = OP_LDW) else '0';
+                d1_reg_we <= '1' when (unsigned(f2_insn(31 downto 26)) <= 14) or
+                                      (f2_insn(31 downto 26) = OP_LDW) else '0';
             end if;
         end if;
     end process;
@@ -437,7 +437,7 @@ begin
                 d2_s1_rs1_val <= rf1_rdata1;
                 d2_s1_rs2_val <= rf1_rdata2;
                 d2_s1_imm     <= sext16(raw_s1_imm);
-                d2_s1_reg_we  <= '1' when (unsigned(raw_s1_op) <= 8) or
+                d2_s1_reg_we  <= '1' when (unsigned(raw_s1_op) <= 14) or
                                           (raw_s1_op = OP_LDW) else '0';
             end if;
         end if;
@@ -446,14 +446,16 @@ begin
     -- ─── ALU0 (slot 0) ──────────────────────────────────────
     alu0_inst : entity work.brad_alu
         port map (a => d2_s0_rs1_val, b => d2_s0_rs2_val,
-                  op => d2_s0_opcode, result => alu0_result);
+                  op => d2_s0_opcode, result => alu0_result,
+                  div_zero => open);
 
     s0_addi_out <= std_logic_vector(unsigned(d2_s0_rs1_val) + unsigned(d2_s0_imm));
 
     -- ─── ALU1 (slot 1) ──────────────────────────────────────
     alu1_inst : entity work.brad_alu
         port map (a => d2_s1_rs1_val, b => d2_s1_rs2_val,
-                  op => d2_s1_opcode, result => alu1_result);
+                  op => d2_s1_opcode, result => alu1_result,
+                  div_zero => open);
 
     s1_addi_out <= std_logic_vector(unsigned(d2_s1_rs1_val) + unsigned(d2_s1_imm));
 
@@ -478,7 +480,7 @@ begin
                 ex1_rd     <= d2_s0_rd;
                 ex1_reg_we <= d2_s0_reg_we;
 
-                if unsigned(d2_s0_opcode) <= 7 then
+                if unsigned(d2_s0_opcode) <= 14 then
                     res := alu0_result;
                 elsif d2_s0_opcode = OP_ADDI then
                     res := s0_addi_out;
@@ -507,7 +509,8 @@ begin
     ret_taken  <= '1' when (d2_s0_opcode = OP_RET)  else '0';
     branch_taken <= d2_s0_valid and (bz_taken or bnz_taken or jmp_taken or call_taken or ret_taken);
     br_target <= d2_s0_rs1_val when d2_s0_opcode = OP_RET else
-                 std_logic_vector(unsigned(d2_s0_pc) + 4 + unsigned(d2_s0_imm));
+                 std_logic_vector(unsigned(d2_s0_pc) + 4
+                                + shift_left(unsigned(d2_s0_imm), 2));
     next_pc <= br_target;
 
     flush <= branch_taken;
@@ -537,7 +540,7 @@ begin
             -- Slot 1 execute
             ex2_s1_valid <= d2_paired and d2_s1_valid;
             ex2_s1_rd    <= d2_s1_rd;
-            if unsigned(d2_s1_opcode) <= 7 then
+            if unsigned(d2_s1_opcode) <= 14 then
                 res := alu1_result;
             elsif d2_s1_opcode = OP_ADDI then
                 res := s1_addi_out;

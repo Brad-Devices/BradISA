@@ -1,5 +1,5 @@
 -- SPDX-License-Identifier: MIT
--- BradISA V1 -- VHDL Testbench
+-- BradISA V2 -- VHDL Testbench
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -40,8 +40,8 @@ begin
             clk => clk, rst_n => rst_n,
             imem_addr => imem_addr, imem_rdata => imem_rdata,
             dmem_addr => dmem_addr, dmem_req => dmem_req,
-            dmem_we => dmem_we, dmem_wdata => dmem_wdata,
-            dmem_rdata => dmem_rdata
+            dmem_we => dmem_we, dmem_be => open, dmem_wdata => dmem_wdata,
+            dmem_rdata => dmem_rdata, fault => open
         );
 
     -- Undefined (X/U) instruction addresses read as 0; the core's pc becomes
@@ -68,13 +68,14 @@ begin
     end process;
 
     process begin
-        -- Load program
-        imem(0) <= x"81100064";  -- ADDI r1, r1, 100
-        imem(1) <= x"82200000";  -- ADDI r2, r2, 0
-        imem(2) <= x"8110FFFF";  -- ADDI r1, r1, -1  (loop:)
-        imem(3) <= x"82200001";  -- ADDI r2, r2, 1
-        imem(4) <= x"C010FFFD";  -- BNZ  r1, loop     (offset = -3 words = -12 bytes)
-        imem(5) <= x"D00FFFFF";  -- JMP  self         (epilogue: spin in place)
+        -- Load program (V2 encodings, produced by tools/bradasm from the
+        -- assembly comments; the assembler is the source of truth).
+        imem(0) <= x"40210064";  -- ADDI r1, r1, 100
+        imem(1) <= x"40420000";  -- ADDI r2, r2, 0
+        imem(2) <= x"4021FFFF";  -- ADDI r1, r1, -1  (loop:)
+        imem(3) <= x"40420001";  -- ADDI r2, r2, 1
+        imem(4) <= x"DC20FFFD";  -- BNZ  r1, loop     (offset = -3 words = -12 bytes)
+        imem(5) <= x"A81FFFFF";  -- JMP  self         (epilogue: spin in place)
 
         rst_n <= '0';
         wait for 15 ns;

@@ -1,5 +1,5 @@
 -- SPDX-License-Identifier: MIT
--- BradISA V1 -- full-ISA regression for brad_core (VHDL)
+-- BradISA V2 -- full-ISA regression for brad_core (VHDL)
 --
 -- Mirrors rtl/verilog/tb_brad_isa.v: both load the words that bradasm
 -- assembles from rtl/asm/tb_brad_isa.s and check what the core did with
@@ -20,8 +20,8 @@
 -- green the whole time.
 --
 -- Encoding (authoritative: the RTL, not docs/04-base-isa.md):
---   word = (op << 28) | (rd << 24) | (rs1 << 20) | (rs2 << 16) | (imm16)
---   branch/jump target = pc + 4 + sext(imm16) * 4
+--   word = (op << 26) | (rd << 21) | (rs1 << 16) | (rs2 << 11) | (imm16)
+--   branch/jump target = pc + 4 + sext(offset) * 4
 -- None of the words below are written here; they come from the assembler.
 
 library ieee;
@@ -88,8 +88,8 @@ begin
             clk => clk, rst_n => rst_n,
             imem_addr => imem_addr, imem_rdata => imem_rdata,
             dmem_addr => dmem_addr, dmem_req => dmem_req,
-            dmem_we => dmem_we, dmem_wdata => dmem_wdata,
-            dmem_rdata => dmem_rdata
+            dmem_we => dmem_we, dmem_be => open, dmem_wdata => dmem_wdata,
+            dmem_rdata => dmem_rdata, fault => open
         );
 
     -- Index reads are guarded with is_x: the address buses are undefined
@@ -146,7 +146,7 @@ begin
         procedure clear_mem is
         begin
             for i in 0 to 255 loop
-                imem(i) <= x"81000000";   -- NOP (ADDI r0, r0, 0)
+                imem(i) <= x"00000000";   -- NOP (V2 opcode 0)
             end loop;
         end procedure;
 

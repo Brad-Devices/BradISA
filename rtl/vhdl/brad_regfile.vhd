@@ -1,5 +1,7 @@
 -- SPDX-License-Identifier: MIT
--- BradISA V1 -- Register File (VHDL)
+-- BradISA V2 -- Register File (VHDL)
+-- 32 x 32-bit general-purpose registers.  r0 is hardwired to zero.
+-- Synchronous write, asynchronous read.
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -10,18 +12,18 @@ entity brad_regfile is
     port (
         clk     : in  std_logic;
         rst_n   : in  std_logic;
-        raddr1  : in  std_logic_vector(3 downto 0);
+        raddr1  : in  std_logic_vector(4 downto 0);
         rdata1  : out std_logic_vector(31 downto 0);
-        raddr2  : in  std_logic_vector(3 downto 0);
+        raddr2  : in  std_logic_vector(4 downto 0);
         rdata2  : out std_logic_vector(31 downto 0);
         we      : in  std_logic;
-        waddr   : in  std_logic_vector(3 downto 0);
+        waddr   : in  std_logic_vector(4 downto 0);
         wdata   : in  std_logic_vector(31 downto 0)
     );
 end entity brad_regfile;
 
 architecture rtl of brad_regfile is
-    type reg_array is array (0 to 15) of std_logic_vector(31 downto 0);
+    type reg_array is array (0 to NUM_REGS-1) of std_logic_vector(31 downto 0);
     signal regs : reg_array := (others => (others => '0'));
 begin
 

@@ -1,6 +1,17 @@
 -- SPDX-License-Identifier: MIT
--- BradISA V1 -- BradCore (Falcon 5-stage in-order pipeline, VHDL)
--- Synthesisable for FPGA.
+-- BradISA V2 -- BradCore (Falcon pipeline, VHDL)
+-- Stages: F -> D -> EX -> WB.
+--
+-- In-order, single-issue, no stalls.  RAW hazards are covered by forwarding
+-- from the EX and WB stages into the decode operand capture, which is sound
+-- here because the data memory returns in the same cycle (the single-cycle
+-- memory contract this core is specified against).  A multi-cycle memory
+-- would need a stall path.
+--
+-- This is the VHDL half of the same design as rtl/verilog/brad_core.v +
+-- brad_decode.v + brad_execute.v.  The two trees are kept as one design: a
+-- change to the ISA in one is a change in the other, and the shared
+-- full-ISA program (rtl/asm/tb_brad_isa.s) executes on both.
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -11,130 +22,449 @@ entity brad_core is
     port (
         clk         : in  std_logic;
         rst_n       : in  std_logic;
+        -- Instruction memory port (single-cycle, combinational read)
         imem_addr   : out std_logic_vector(31 downto 0);
         imem_rdata  : in  std_logic_vector(31 downto 0);
+        -- Data memory port (single-cycle, combinational read)
         dmem_addr   : out std_logic_vector(31 downto 0);
         dmem_req    : out std_logic;
         dmem_we     : out std_logic;
+        dmem_be     : out std_logic_vector(3 downto 0);
         dmem_wdata  : out std_logic_vector(31 downto 0);
-        dmem_rdata  : in  std_logic_vector(31 downto 0)
+        dmem_rdata  : in  std_logic_vector(31 downto 0);
+        -- One-cycle fault: undefined opcode or divide by zero in EX
+        fault       : out std_logic
     );
 end entity brad_core;
 
 architecture rtl of brad_core is
 
-    -- Pipeline registers: Fetch
-    signal f_valid : std_logic;
-    signal f_pc    : std_logic_vector(31 downto 0);
-    signal f_insn  : std_logic_vector(31 downto 0);
+    -- ─── Fetch stage ────────────────────────────────────────────
+    signal f_valid : std_logic := '0';
+    signal f_pc    : std_logic_vector(31 downto 0) := (others => '0');
+    signal f_insn  : std_logic_vector(31 downto 0) := (others => '0');
 
-    -- Pipeline registers: Decode
-    signal d_valid    : std_logic;
-    signal d_pc       : std_logic_vector(31 downto 0);
-    signal d_opcode   : std_logic_vector(3 downto 0);
-    signal d_rd       : std_logic_vector(3 downto 0);
-    signal d_rs1      : std_logic_vector(3 downto 0);
-    signal d_rs2      : std_logic_vector(3 downto 0);
-    signal d_rs1_val  : std_logic_vector(31 downto 0);
-    signal d_rs2_val  : std_logic_vector(31 downto 0);
-    signal d_imm      : std_logic_vector(31 downto 0);
-    signal d_reg_we   : std_logic;
-    -- (no separate Execute-stage registers: writeback is Decode-driven so the
-    --  result commits to the register file in the same cycle the ALU sees it)
+    -- ─── Decode stage registers ─────────────────────────────────
+    signal d_valid   : std_logic := '0';
+    signal d_opcode  : std_logic_vector(5 downto 0) := (others => '0');
+    signal d_rd      : std_logic_vector(4 downto 0) := (others => '0');
+    signal d_rs1     : std_logic_vector(4 downto 0) := (others => '0');
+    signal d_rs2     : std_logic_vector(4 downto 0) := (others => '0');
+    signal d_rs1_val : std_logic_vector(31 downto 0) := (others => '0');
+    signal d_rs2_val : std_logic_vector(31 downto 0) := (others => '0');
+    signal d_pc      : std_logic_vector(31 downto 0) := (others => '0');
+    signal d_imm     : std_logic_vector(31 downto 0) := (others => '0');
+    signal d_reg_we  : std_logic := '0';
+    signal d_undef   : std_logic := '0';
 
-    -- PC
-    signal pc          : std_logic_vector(31 downto 0);
-    signal next_pc     : std_logic_vector(31 downto 0);
-    signal branch_taken : std_logic;
+    -- ─── Writeback stage ────────────────────────────────────────
+    signal w_valid  : std_logic := '0';
+    signal w_rd     : std_logic_vector(4 downto 0) := (others => '0');
+    signal w_result : std_logic_vector(31 downto 0) := (others => '0');
+    signal w_reg_we : std_logic := '0';
 
-    -- Register file
+    -- ─── PC ─────────────────────────────────────────────────────
+    signal pc           : std_logic_vector(31 downto 0) := (others => '0');
+    signal branch_taken : std_logic := '0';
+    signal branch_target : std_logic_vector(31 downto 0) := (others => '0');
+
+    -- ─── Decode / register file wiring ──────────────────────────
+    signal id_raddr1 : std_logic_vector(4 downto 0);
+    signal id_raddr2 : std_logic_vector(4 downto 0);
     signal rf_rdata1 : std_logic_vector(31 downto 0);
     signal rf_rdata2 : std_logic_vector(31 downto 0);
-    signal rf_raddr2 : std_logic_vector(3 downto 0);
-    signal rf_we     : std_logic;
-    signal rf_waddr  : std_logic_vector(3 downto 0);
-    signal rf_wdata  : std_logic_vector(31 downto 0);
+    signal id_rdata1 : std_logic_vector(31 downto 0);
+    signal id_rdata2 : std_logic_vector(31 downto 0);
 
-    -- Writeback data mux (combinational on the Decode-stage instruction)
-    signal wb_result : std_logic_vector(31 downto 0);
+    -- ─── Execute outputs ────────────────────────────────────────
+    signal ex_rd         : std_logic_vector(4 downto 0);
+    signal ex_result     : std_logic_vector(31 downto 0);
+    signal ex_reg_we     : std_logic;
+    signal ex_illegal    : std_logic;
+    signal ex_addr       : std_logic_vector(31 downto 0);
+    signal ex_mem_req    : std_logic;
+    signal ex_mem_we     : std_logic;
+    signal ex_mem_be     : std_logic_vector(3 downto 0);
+    signal ex_store_data : std_logic_vector(31 downto 0);
 
-    -- RAW hazard
-    signal raw_hazard  : std_logic;
-    signal stall       : std_logic;
-    signal raw_uses_rs2 : std_logic;
+    -- ─── Decode raw fields ──────────────────────────────────────
+    signal opcode : std_logic_vector(5 downto 0);
+    signal f_rd   : std_logic_vector(4 downto 0);
+    signal f_rs1  : std_logic_vector(4 downto 0);
+    signal f_rs2  : std_logic_vector(4 downto 0);
+    signal imm16  : std_logic_vector(15 downto 0);
+    signal imm21  : std_logic_vector(20 downto 0);
 
-    -- Branch resolution
-    signal bz_taken   : std_logic;
-    signal bnz_taken  : std_logic;
-    signal jmp_taken  : std_logic;
-    signal call_taken : std_logic;
-    signal ret_taken  : std_logic;
-    signal br_target  : std_logic_vector(31 downto 0);
+    -- ─── Decode format detection ────────────────────────────────
+    signal fmt_rrr  : std_logic;
+    signal fmt_ri   : std_logic;
+    signal fmt_si   : std_logic;
+    signal fmt_u    : std_logic;
+    signal fmt_jmp  : std_logic;
+    signal fmt_ij   : std_logic;
+    signal fmt_br   : std_logic;
+    signal fmt_amo  : std_logic;
+    signal is_ret   : std_logic;   -- fetch stage: drives the read-address mux
+    signal is_ret_d : std_logic;   -- decode stage: drives execute/redirect
+    signal is_fence : std_logic;
+    signal is_nop   : std_logic;
+    signal is_undef : std_logic;
+    signal reg_we   : std_logic;
 
-    -- Decode field extraction
-    signal raw_op  : std_logic_vector(3 downto 0);
-    signal raw_rd  : std_logic_vector(3 downto 0);
-    signal raw_rs1 : std_logic_vector(3 downto 0);
-    signal raw_rs2 : std_logic_vector(3 downto 0);
-    signal raw_imm : std_logic_vector(15 downto 0);
-
-    -- ALU result
-    signal alu_result : std_logic_vector(31 downto 0);
-
-    -- ADDI result
-    signal addi_result : std_logic_vector(31 downto 0);
+    -- ─── Execute groups ─────────────────────────────────────────
+    signal op_rrr      : std_logic;
+    signal op_br       : std_logic;
+    signal op_ij       : std_logic;
+    signal op_jump      : std_logic;
+    signal is_amo      : std_logic;
+    signal is_load     : std_logic;
+    signal is_store    : std_logic;
+    signal is_amo_load : std_logic;
+    signal is_amo_store : std_logic;
+    signal is_mem      : std_logic;
+    signal is_jmp_op   : std_logic;
+    signal alu_result  : std_logic_vector(31 downto 0);
+    signal alu_div_zero : std_logic;
+    signal br_cond     : std_logic;
+    signal pc_rel      : std_logic_vector(31 downto 0);
+    signal jalr_tgt     : std_logic_vector(31 downto 0);
 
 begin
 
-    -- ─── Instruction field extraction ────────────────────────
-    raw_op  <= f_insn(31 downto 28);
-    raw_rd  <= f_insn(27 downto 24);
-    raw_rs1 <= f_insn(23 downto 20);
-    raw_rs2 <= f_insn(19 downto 16);
-    raw_imm <= f_insn(15 downto 0);
+    -- ─── Raw fields ─────────────────────────────────────────────
+    opcode <= f_insn(31 downto 26);
+    f_rd   <= f_insn(25 downto 21);
+    f_rs1  <= f_insn(20 downto 16);
+    f_rs2  <= f_insn(15 downto 11);
+    imm16  <= f_insn(15 downto 0);
+    imm21  <= f_insn(20 downto 0);
 
-    -- ─── Register file instance ──────────────────────────────
-    -- Read ports track the incoming (Fetch-stage) instruction's registers so
-    -- the operand captured at the Decode posedge belongs to that instruction.
-    rf_raddr2 <= raw_rs2;
+    -- ─── Format detection from opcode range ─────────────────────
+    -- Chips, not one inline conditional chain: GHDL rejects inline
+    -- conditionals mixed with and/or, and each of these is used in several
+    -- places below.
+    fmt_rrr <= '1' when unsigned(f_insn(31 downto 26)) <= 14 else '0';
+    fmt_ri  <= '1' when unsigned(f_insn(31 downto 26)) >= 16 and unsigned(f_insn(31 downto 26)) <= 34 else '0';
+    fmt_si  <= '1' when unsigned(f_insn(31 downto 26)) >= 35 and unsigned(f_insn(31 downto 26)) <= 37 else '0';
+    fmt_u   <= '1' when unsigned(f_insn(31 downto 26)) >= 40 and unsigned(f_insn(31 downto 26)) <= 41 else '0';
+    fmt_jmp <= '1' when unsigned(f_insn(31 downto 26)) >= 42 and unsigned(f_insn(31 downto 26)) <= 44 else '0';
+    fmt_ij  <= '1' when unsigned(f_insn(31 downto 26)) = 45 else '0';
+    fmt_br  <= '1' when unsigned(f_insn(31 downto 26)) >= 48 and unsigned(f_insn(31 downto 26)) <= 55 else '0';
+    fmt_amo <= '1' when unsigned(f_insn(31 downto 26)) >= 56 and unsigned(f_insn(31 downto 26)) <= 59 else '0';
+    is_ret   <= '1' when unsigned(f_insn(31 downto 26)) = 46 else '0';
+    is_ret_d <= '1' when unsigned(d_opcode) = 46 else '0';
+    is_fence <= '1' when unsigned(f_insn(31 downto 26)) = 47 else '0';
+    is_nop   <= '1' when unsigned(f_insn(31 downto 26)) = 0 else '0';
 
+    -- Undef detection: 14 reserved slots (0x0F, 0x19-0x1F, 0x26-0x27, 0x3C-0x3F)
+    is_undef <= '1' when (unsigned(f_insn(31 downto 26)) = 15)
+                          or (unsigned(f_insn(31 downto 26)) >= 25 and unsigned(f_insn(31 downto 26)) <= 31)
+                          or (unsigned(f_insn(31 downto 26)) >= 38 and unsigned(f_insn(31 downto 26)) <= 39)
+                          or (unsigned(f_insn(31 downto 26)) >= 60 and unsigned(f_insn(31 downto 26)) <= 63)
+                    else '0';
+
+    -- Register write enable.  NOP, stores, branches, JMP, RET and FENCE
+    -- write no register.  CALL writes the link register (r15) regardless.
+    reg_we <= '1' when (((fmt_rrr = '1' or fmt_ri = '1' or fmt_u = '1' or fmt_amo = '1')
+                          and is_nop = '0')
+                        or unsigned(f_insn(31 downto 26)) = 43      -- JAL
+                        or unsigned(f_insn(31 downto 26)) = 44      -- CALL
+                        or unsigned(f_insn(31 downto 26)) = 45)     -- JALR
+                    else '0';
+
+    -- ─── Register file read addresses ───────────────────────────
+    id_raddr1 <= f_rd when fmt_br = '1' else
+                 REG_LR when is_ret = '1' else
+                 f_rs1 when (fmt_rrr = '1' or fmt_ri = '1' or fmt_si = '1'
+                             or fmt_ij = '1' or fmt_amo = '1') else
+                 (others => '0');
+
+    id_raddr2 <= f_rs2 when (fmt_rrr = '1' or fmt_amo = '1') else
+                 f_rd  when fmt_si = '1' else
+                 f_rs1 when fmt_br = '1' else
+                 (others => '0');
+
+    -- ─── Forwarding ─────────────────────────────────────────────
+    -- EX beats WB: it is the younger writer and holds the value the consumer
+    -- would otherwise have to wait a cycle for.
+    id_rdata1 <= ex_result when (d_valid = '1' and d_reg_we = '1'
+                                 and unsigned(d_rd) /= 0
+                                 and d_rd = id_raddr1)
+                else w_result when (w_valid = '1' and w_reg_we = '1'
+                                    and unsigned(w_rd) /= 0
+                                    and w_rd = id_raddr1)
+                else rf_rdata1;
+
+    id_rdata2 <= ex_result when (d_valid = '1' and d_reg_we = '1'
+                                 and unsigned(d_rd) /= 0
+                                 and d_rd = id_raddr2)
+                else w_result when (w_valid = '1' and w_reg_we = '1'
+                                    and unsigned(w_rd) /= 0
+                                    and w_rd = id_raddr2)
+                else rf_rdata2;
+
+    -- ─── Register file instance ─────────────────────────────────
     regfile_inst : entity work.brad_regfile
         port map (
             clk    => clk,
             rst_n  => rst_n,
-            raddr1 => raw_rs1,
+            raddr1 => id_raddr1,
             rdata1 => rf_rdata1,
-            raddr2 => rf_raddr2,
+            raddr2 => id_raddr2,
             rdata2 => rf_rdata2,
-            we     => rf_we,
-            waddr  => rf_waddr,
-            wdata  => rf_wdata
+            we     => w_valid and w_reg_we,
+            waddr  => w_rd,
+            wdata  => w_result
         );
 
-    -- ─── Hazard detection ────────────────────────────────────
-    -- RAW hazard: the instruction in Fetch reads a register that the
-    -- instruction in Decode will write at its Decode->Execute commit posedge.
-    -- Stalling Fetch one cycle lets that write land before the dependent
-    -- instruction samples the register file.
-    -- The RRR ops and STW are the instructions that actually consume the rs2
-    -- field; ADDI, LDW, BZ, BNZ and JMP ignore it.  Testing rs2 only for STW
-    -- (as this used to) left the register-file read port pinned to r0 for every
-    -- RRR op -- ADD/SUB/MUL/AND/OR/XOR/SHL/SHR silently computed rd = rs1 op r0.
-    -- The gate has to match what the instruction reads, or the hazard unit
-    -- lies about dependencies that are real.
-    -- Each comparison is parenthesised: in VHDL "=" binds looser than "<=".
-    -- The condition is already a boolean, so no "= '1'" comparison is needed
-    -- (VHDL will not compare a boolean against a std_logic literal).
-    raw_uses_rs2 <= '1' when ((raw_op <= OP_SHR) or (raw_op = OP_STW)) else '0';
+    -- ─── Decode stage (registered) ──────────────────────────────
+    process(clk, rst_n) begin
+        if rst_n = '0' then
+            d_valid   <= '0';
+            d_opcode  <= (others => '0');
+            d_rd      <= (others => '0');
+            d_rs1     <= (others => '0');
+            d_rs2     <= (others => '0');
+            d_rs1_val <= (others => '0');
+            d_rs2_val <= (others => '0');
+            d_pc      <= (others => '0');
+            d_imm     <= (others => '0');
+            d_reg_we  <= '0';
+            d_undef   <= '0';
+        elsif rising_edge(clk) then
+            if branch_taken = '1' then
+                d_valid <= '0';
+            else
+                d_valid  <= f_valid;
+                d_opcode <= opcode;
+                d_pc     <= f_pc;
+                d_undef  <= is_undef;
+                d_rs1_val <= id_rdata1;
+                d_rs2_val <= id_rdata2;
+                d_reg_we  <= reg_we and not is_undef;
 
-    raw_hazard <= '1' when (f_valid = '1') and (d_valid = '1') and (d_reg_we = '1')
-                            and (d_rd /= REG_R0)
-                            and ( (raw_rs1 = d_rd)
-                                  or ((raw_uses_rs2 = '1') and (raw_rs2 = d_rd)) )
-                   else '0';
-    stall <= raw_hazard;
+                -- Field extraction.  Roles, not slices.
+                if (fmt_rrr = '1' or fmt_amo = '1') then
+                    d_rd  <= (others => '0') when is_nop = '1' else f_rd;
+                    d_rs1 <= f_rs1;
+                    d_rs2 <= f_rs2;
+                    d_imm <= (others => '0');
+                elsif fmt_ri = '1' then
+                    d_rd  <= f_rd;
+                    d_rs1 <= f_rs1;
+                    d_rs2 <= (others => '0');
+                    d_imm <= sext16(imm16);
+                elsif fmt_si = '1' then
+                    d_rd  <= (others => '0');
+                    d_rs1 <= f_rs1;
+                    d_rs2 <= f_rd;   -- [25:21] holds the store source
+                    d_imm <= sext16(imm16);
+                elsif fmt_br = '1' then
+                    d_rd  <= (others => '0');
+                    d_rs1 <= f_rd;
+                    d_rs2 <= f_rs1;
+                    d_imm <= std_logic_vector(shift_left(unsigned(sext16(imm16)), 2));
+                elsif fmt_ij = '1' then
+                    d_rd  <= f_rd;
+                    d_rs1 <= f_rs1;
+                    d_rs2 <= (others => '0');
+                    d_imm <= sext16(imm16);
+                elsif fmt_jmp = '1' then
+                    d_rd  <= REG_LR when unsigned(opcode) = 44 else f_rd;  -- CALL -> lr
+                    d_rs1 <= (others => '0');
+                    d_rs2 <= (others => '0');
+                    d_imm <= std_logic_vector(shift_left(unsigned(sext21(imm21)), 2));
+                elsif fmt_u = '1' then
+                    d_rd  <= f_rd;
+                    d_rs1 <= (others => '0');
+                    d_rs2 <= (others => '0');
+                    d_imm <= sext21(imm21);
+                else
+                    -- RET, FENCE, NOP
+                    d_rd  <= (others => '0');
+                    d_rs1 <= (others => '0');
+                    d_rs2 <= (others => '0');
+                    d_imm <= (others => '0');
+                end if;
+            end if;
+        end if;
+    end process;
 
-    -- ─── Fetch stage ─────────────────────────────────────────
+    -- ─── ALU instance ───────────────────────────────────────────
+    alu_inst : entity work.brad_alu
+        port map (
+            a        => d_rs1_val,
+            b        => d_rs2_val,
+            op       => d_opcode,
+            result   => alu_result,
+            div_zero => alu_div_zero
+        );
+
+    -- ─── Execute opcode groups ───────────────────────────────────
+    -- Format is a pure function of the opcode, so the execute stage derives
+    -- its group signals from d_opcode exactly as the decode stage derived
+    -- them from the fetch-stage opcode.  RRR covers the ALU group and the
+    -- AMO opcodes (which reuse the RRR field shape).
+    op_rrr <= '1' when (unsigned(d_opcode) <= 14)
+                        or (unsigned(d_opcode) >= 56 and unsigned(d_opcode) <= 59)
+              else '0';
+    op_br  <= '1' when d_opcode >= OP_BEQ and d_opcode <= OP_BNZ else '0';
+    op_ij  <= '1' when d_opcode = OP_JALR else '0';
+    op_jump <= '1' when d_opcode = OP_JMP or d_opcode = OP_JAL or d_opcode = OP_CALL else '0';
+
+    is_amo      <= '1' when d_opcode >= OP_LR_W and d_opcode <= OP_AMOADD_W else '0';
+    is_load     <= '1' when d_opcode = OP_LDW or d_opcode = OP_LHU or d_opcode = OP_LHBU else '0';
+    is_store    <= '1' when d_opcode = OP_STW or d_opcode = OP_SH or d_opcode = OP_SB else '0';
+    is_amo_load <= '1' when d_opcode = OP_LR_W else '0';
+    is_amo_store <= '1' when d_opcode = OP_SC_W or d_opcode = OP_AMOSWAP_W
+                              or d_opcode = OP_AMOADD_W else '0';
+    is_mem      <= '1' when (is_load = '1' or is_store = '1' or is_amo = '1') else '0';
+    is_jmp_op   <= '1' when (d_opcode = OP_JMP or d_opcode = OP_JAL or d_opcode = OP_CALL) else '0';
+
+    -- ─── Branch resolution ──────────────────────────────────────
+    process(d_opcode, d_rs1_val, d_rs2_val) begin
+        br_cond <= '0';
+        case d_opcode is
+            when OP_BEQ  => br_cond <= '1' when d_rs1_val = d_rs2_val else '0';
+            when OP_BNE  => br_cond <= '1' when d_rs1_val /= d_rs2_val else '0';
+            when OP_BLT  => br_cond <= '1' when signed(d_rs1_val) < signed(d_rs2_val) else '0';
+            when OP_BGE  => br_cond <= '1' when signed(d_rs1_val) >= signed(d_rs2_val) else '0';
+            when OP_BLTU => br_cond <= '1' when unsigned(d_rs1_val) < unsigned(d_rs2_val) else '0';
+            when OP_BGEU => br_cond <= '1' when unsigned(d_rs1_val) >= unsigned(d_rs2_val) else '0';
+            when OP_BZ   => br_cond <= '1' when unsigned(d_rs1_val) = 0 else '0';
+            when OP_BNZ  => br_cond <= '1' when unsigned(d_rs1_val) /= 0 else '0';
+            when others  => br_cond <= '0';
+        end case;
+    end process;
+
+    pc_rel  <= std_logic_vector(unsigned(d_pc) + 4 + unsigned(d_imm));
+    jalr_tgt <= std_logic_vector((unsigned(d_rs1_val) + unsigned(d_imm)) and x"FFFFFFFE");
+
+    -- ─── Execute + writeback datapath ───────────────────────────
+    process(d_valid, d_opcode, d_rd, d_rs1, d_rs2, d_rs1_val, d_rs2_val,
+            d_pc, d_imm, d_reg_we, d_undef, alu_result, alu_div_zero,
+            dmem_rdata, br_cond, is_load, is_store, is_amo, is_amo_load,
+            is_amo_store, is_mem, op_rrr, op_br, op_ij, is_jmp_op, is_ret_d,
+            pc_rel, jalr_tgt)
+        variable v_result : std_logic_vector(31 downto 0);
+        variable v_reg_we : std_logic;
+        variable v_illegal : std_logic;
+        variable v_mem_req, v_mem_we : std_logic;
+        variable v_mem_be : std_logic_vector(3 downto 0);
+        variable v_store_data : std_logic_vector(31 downto 0);
+        variable v_branch_taken : std_logic := '0';
+    begin
+        -- Defaults: no write, no memory, no branch, no trap.
+        v_result      := (others => '0');
+        v_reg_we      := d_reg_we and d_valid and not d_undef;
+        v_illegal     := d_undef;
+        v_mem_req     := '0';
+        v_mem_we      := '0';
+        v_mem_be      := (others => '0');
+        v_store_data  := d_rs2_val;
+        v_branch_taken := '0';
+        ex_addr       <= std_logic_vector(unsigned(d_rs1_val) + unsigned(d_imm));
+
+        -- Result select.
+        if (op_rrr = '1' and is_amo = '0') then
+            v_result := alu_result;
+            if alu_div_zero = '1' then
+                v_illegal := '1';
+            end if;
+        elsif d_opcode = OP_ADDI then
+            v_result := std_logic_vector(unsigned(d_rs1_val) + unsigned(d_imm));
+        elsif d_opcode = OP_ANDI then
+            v_result := d_rs1_val and (x"0000" & d_imm(15 downto 0));
+        elsif d_opcode = OP_ORI then
+            v_result := d_rs1_val or (x"0000" & d_imm(15 downto 0));
+        elsif d_opcode = OP_XORI then
+            v_result := d_rs1_val xor (x"0000" & d_imm(15 downto 0));
+        elsif d_opcode = OP_SLLI then
+            v_result := std_logic_vector(shift_left(unsigned(d_rs1_val), to_integer(unsigned(d_imm(4 downto 0)))));
+        elsif d_opcode = OP_SRLI then
+            v_result := std_logic_vector(shift_right(unsigned(d_rs1_val), to_integer(unsigned(d_imm(4 downto 0)))));
+        elsif d_opcode = OP_SRAI then
+            v_result := std_logic_vector(shift_right(signed(d_rs1_val), to_integer(unsigned(d_imm(4 downto 0)))));
+        elsif d_opcode = OP_SLTI then
+            v_result := x"00000001" when signed(d_rs1_val) < signed(d_imm) else x"00000000";
+        elsif d_opcode = OP_SLTIU then
+            v_result := x"00000001" when unsigned(d_rs1_val) < unsigned(x"0000" & d_imm(15 downto 0)) else x"00000000";
+        elsif d_opcode = OP_LUI then
+            v_result := std_logic_vector(shift_left(unsigned(d_imm), 11));
+        elsif d_opcode = OP_AUIPC then
+            v_result := std_logic_vector(unsigned(d_pc) + shift_left(unsigned(d_imm), 11));
+        elsif d_opcode = OP_JAL or d_opcode = OP_CALL or d_opcode = OP_JALR then
+            v_result := std_logic_vector(unsigned(d_pc) + 4);   -- link value
+        elsif is_load = '1' then
+            if d_opcode = OP_LDW then
+                v_result := dmem_rdata;
+            elsif d_opcode = OP_LHU then
+                v_result := x"0000" & dmem_rdata(15 downto 0);
+            else
+                v_result := x"000000" & dmem_rdata(7 downto 0);
+            end if;
+        elsif is_amo_load = '1' or d_opcode = OP_AMOSWAP_W or d_opcode = OP_AMOADD_W then
+            v_result := dmem_rdata;   -- old memory value
+        elsif d_opcode = OP_SC_W then
+            v_result := x"00000000";  -- 0 = success
+        end if;
+
+        -- Memory request.
+        if is_mem = '1' then
+            v_mem_req := '1';
+            if is_store = '1' or is_amo_store = '1' then
+                v_mem_we := '1';
+            end if;
+            if d_opcode = OP_SH then
+                v_store_data := x"0000" & d_rs2_val(15 downto 0);
+                v_mem_be     := "0011";
+            elsif d_opcode = OP_SB then
+                v_store_data := x"000000" & d_rs2_val(7 downto 0);
+                v_mem_be     := "0001";
+            elsif d_opcode = OP_AMOADD_W then
+                v_store_data := std_logic_vector(unsigned(dmem_rdata) + unsigned(d_rs2_val));
+                v_mem_be     := "1111";
+            elsif v_mem_we = '1' then
+                v_mem_be     := "1111";
+            end if;
+        end if;
+
+        -- Branch / jump.
+        if op_br = '1' then
+            v_branch_taken := br_cond;
+            branch_target  <= pc_rel;
+        elsif is_jmp_op = '1' then
+            v_branch_taken := '1';
+            branch_target  <= pc_rel;
+        elsif op_ij = '1' then
+            v_branch_taken := '1';
+            branch_target  <= jalr_tgt;
+        elsif is_ret_d = '1' then
+            v_branch_taken := '1';
+            branch_target  <= d_rs1_val;   -- link register, read as rs1
+        end if;
+
+        -- A non-valid slot issues nothing.
+        if d_valid = '0' then
+            v_reg_we  := '0';
+            v_mem_req := '0';
+            v_mem_we  := '0';
+            v_branch_taken := '0';
+            v_illegal := '0';
+        end if;
+
+        ex_rd         <= d_rd;
+        ex_result     <= v_result;
+        ex_reg_we     <= v_reg_we;
+        ex_illegal    <= v_illegal;
+        ex_mem_req    <= v_mem_req;
+        ex_mem_we     <= v_mem_we;
+        ex_mem_be     <= v_mem_be;
+        ex_store_data <= v_store_data;
+        branch_taken  <= v_branch_taken;
+    end process;
+
+    -- ─── Fetch ───────────────────────────────────────────────────
     imem_addr <= pc;
 
     process(clk, rst_n) begin
@@ -145,9 +475,11 @@ begin
             f_insn  <= (others => '0');
         elsif rising_edge(clk) then
             if branch_taken = '1' then
+                -- The instruction being fetched and the one in decode are
+                -- both wrong-path.  Redirect, and spend one cycle refilling.
+                pc      <= branch_target;
                 f_valid <= '0';
-                pc      <= next_pc;
-            elsif stall = '0' then
+            else
                 f_valid <= '1';
                 f_pc    <= pc;
                 f_insn  <= imem_rdata;
@@ -156,88 +488,29 @@ begin
         end if;
     end process;
 
-    -- ─── Decode stage ────────────────────────────────────────
-    addi_result <= std_logic_vector(unsigned(d_rs1_val) + unsigned(d_imm));
-
+    -- ─── Writeback ──────────────────────────────────────────────
     process(clk, rst_n) begin
         if rst_n = '0' then
-            d_valid   <= '0';
-            d_pc      <= (others => '0');
-            d_opcode  <= (others => '0');
-            d_rd      <= (others => '0');
-            d_rs1     <= (others => '0');
-            d_rs2     <= (others => '0');
-            d_rs1_val <= (others => '0');
-            d_rs2_val <= (others => '0');
-            d_imm     <= (others => '0');
-            d_reg_we  <= '0';
+            w_valid  <= '0';
+            w_rd     <= (others => '0');
+            w_result <= (others => '0');
+            w_reg_we <= '0';
         elsif rising_edge(clk) then
-            if branch_taken = '1' then
-                d_valid <= '0';
-            elsif stall = '1' then
-                -- The producer in Decode has already committed its writeback
-                -- through the Decode-driven write port this posedge; draining
-                -- Decode lets the Fetch-vs-Decode hazard release cleanly.
-                d_valid <= '0';
-            else
-                d_valid   <= f_valid;
-                d_pc      <= f_pc;
-                d_opcode  <= raw_op;
-                d_rd      <= raw_rd;
-                d_rs1     <= raw_rs1;
-                d_rs2     <= raw_rs2;
-                d_rs1_val <= rf_rdata1;
-                d_rs2_val <= rf_rdata2;
-                d_imm     <= sext16(raw_imm);
-                d_reg_we  <= '1' when (raw_op = OP_ADD) or (raw_op = OP_SUB) or
-                                     (raw_op = OP_MUL) or (raw_op = OP_AND) or
-                                     (raw_op = OP_OR)  or (raw_op = OP_XOR) or
-                                     (raw_op = OP_SHL) or (raw_op = OP_SHR) or
-                                     (raw_op = OP_ADDI) or (raw_op = OP_LDW) else '0';
-            end if;
+            w_valid  <= d_valid;
+            w_rd     <= ex_rd;
+            w_result <= ex_result;
+            w_reg_we <= ex_reg_we;
         end if;
     end process;
 
-    -- ─── ALU ─────────────────────────────────────────────────
-    alu_inst : entity work.brad_alu
-        port map (a => d_rs1_val, b => d_rs2_val, op => d_opcode, result => alu_result);
+    -- ─── Memory port ─────────────────────────────────────────────
+    dmem_addr  <= ex_addr;
+    dmem_req   <= ex_mem_req;
+    dmem_we    <= ex_mem_we;
+    dmem_be    <= ex_mem_be;
+    dmem_wdata <= ex_store_data;
 
-    -- ─── Branch resolution ───────────────────────────────────
-    bz_taken   <= '1' when (d_opcode = OP_BZ)  and (d_rs1_val = x"00000000") else '0';
-    bnz_taken  <= '1' when (d_opcode = OP_BNZ) and (d_rs1_val /= x"00000000") else '0';
-    jmp_taken  <= '1' when d_opcode = OP_JMP  else '0';
-    call_taken <= '1' when d_opcode = OP_CALL else '0';
-    ret_taken  <= '1' when d_opcode = OP_RET  else '0';
-
-    branch_taken <= d_valid and (bz_taken or bnz_taken or jmp_taken or call_taken or ret_taken);
-    -- BR/JMP/CALL target: PC+4 + (sext(offset) * 4)  -- offset is a word offset
-    br_target   <= std_logic_vector(unsigned(d_pc) + 4 + shift_left(unsigned(d_imm), 2));
-    next_pc     <= d_rs1_val when ret_taken = '1' else br_target;
-
-    -- ─── Execute + Writeback (Decode-driven) ─────────────────
-    -- The writeback data mux is purely combinational on the Decode-stage
-    -- instruction, so the register-file write commits at the same posedge the
-    -- instruction leaves Decode for Execute.  The Fetch-vs-Decode hazard above
-    -- stalls Fetch for exactly one cycle when a dependent instruction would
-    -- otherwise collide with that write.
-    wb_result <= std_logic_vector(unsigned(d_pc) + 4) when (d_opcode = OP_CALL) else
-                 alu_result when (d_opcode = OP_ADD) or (d_opcode = OP_SUB) or
-                                 (d_opcode = OP_MUL) or (d_opcode = OP_AND) or
-                                 (d_opcode = OP_OR)  or (d_opcode = OP_XOR) or
-                                 (d_opcode = OP_SHL) or (d_opcode = OP_SHR) else
-                 addi_result;
-
-    -- ─── Writeback to register file ──────────────────────────
-    -- CALL saves PC+4 to the link register; otherwise rd gets the ALU/ADDI
-    -- result or the single-cycle load data.
-    rf_we    <= '1' when (d_valid = '1') and ( ((d_reg_we = '1') and (d_rd /= REG_R0)) or (d_opcode = OP_CALL) ) else '0';
-    rf_waddr <= REG_LR when (d_opcode = OP_CALL) else d_rd;
-    rf_wdata <= dmem_rdata when (d_opcode = OP_LDW) else wb_result;
-
-    -- Memory port outputs (single-cycle memory; address/data from Decode)
-    dmem_addr  <= std_logic_vector(unsigned(d_rs1_val) + unsigned(d_imm));
-    dmem_req   <= '1' when (d_valid = '1') and ((d_opcode = OP_LDW) or (d_opcode = OP_STW)) else '0';
-    dmem_we    <= '1' when (d_valid = '1') and (d_opcode = OP_STW) else '0';
-    dmem_wdata <= d_rs2_val;
+    -- ─── Fault ───────────────────────────────────────────────────
+    fault <= ex_illegal;
 
 end architecture rtl;
